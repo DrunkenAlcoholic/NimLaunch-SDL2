@@ -8,6 +8,7 @@
 
 [window]
 width = 500                       # Width of the launcher window in pixels
+opacity = 1.0                     # Window opacity (0.1 - 1.0); requires SDL support
 max_visible_items = 10            # Number of items visible at once (affects height)
 center = true                     # true: center window horizontally; false: use position_x/position_y
 position_x = 20                   # X position in pixels when center=false

@@ -7,6 +7,9 @@ import sdl2/ttf
 import sdl2/image
 import ./state
 
+when not declared(setWindowOpacity):
+  proc setWindowOpacity(window: WindowPtr; opacity: cfloat): cint {.cdecl, importc: "SDL_SetWindowOpacity", dynlib: LibName.}
+
 type
   IconTexture = ref object
     tex: TexturePtr
@@ -171,6 +174,10 @@ proc initGui*() =
   st.fontBold = loadFont(fontPath, size, makeBold = true)
   st.fontOverlay = loadFont(fontPath, max(size - 2, 6))
   st.iconCache = initTable[string, IconTexture]()
+
+  when declared(setWindowOpacity):
+    let opac = if config.opacity < 0.1: 0.1 elif config.opacity > 1.0: 1.0 else: config.opacity
+    discard setWindowOpacity(st.window, opac.cfloat)
 
   startTextInput()
 

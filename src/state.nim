@@ -24,6 +24,7 @@ type
   Config* = object
     # Window geometry ----------------------------------------------------
     winWidth*, winMaxHeight*: int
+    opacity*: float            ## 0.1 - 1.0 window opacity (SDL window)
     lineHeight*, maxVisibleItems*: int
     centerWindow*: bool
     positionX*, positionY*: int
@@ -155,6 +156,7 @@ const defaultToml* = """
 
 [window]
 width = 500                       # Width of the launcher window in pixels
+opacity = 1.0                     # Window opacity (0.1 - 1.0); requires SDL support
 max_visible_items = 10            # Number of items visible at once (affects height)
 center = true                     # true: center window horizontally; false: use position_x/position_y
 position_x = 20                   # X position in pixels when center=false
@@ -162,7 +164,7 @@ position_y = 500                  # Y position in pixels when center=false
 vertical_align = "one-third"      # Only used when center=true; "top", "center", or "one-third"
 
 [font]
-fontname = "Dejavu:size=16"    # Font name & size (Xft format: "Font Family:size=N")
+fontname = "Dejavu:size=16"       # Font name & size (e.g., "Font Family:size=N")
 
 [input]
 prompt = "> "                     # Prompt prefix shown before your query

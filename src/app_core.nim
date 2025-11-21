@@ -475,7 +475,14 @@ proc scoreMatch(q, t, fullPath, home: string): int =
   elif pos >= 0: s += 7800
   else:
     var typoHit = false
-    if lq.len >= 2:
+
+    ## Whole-string typo tolerance (1 edit or adjacent swap).
+    if lq.len > 0 and (withinOneEdit(lq, lt) or withinOneTransposition(lq, lt)):
+      typoHit = true
+      s = max(s, 7600)
+
+    ## Substring typo tolerance to catch near-start matches.
+    if not typoHit and lq.len > 0:
       let sizes = [max(1, lq.len - 1), lq.len, lq.len + 1]
       for L in sizes:
         if L > lt.len: continue
@@ -491,9 +498,6 @@ proc scoreMatch(q, t, fullPath, home: string): int =
             break
           inc start
         if typoHit: break
-    if not typoHit and lq.len >= 2:
-      if withinOneEdit(lq, lt) or withinOneTransposition(lq, lt):
-        s = max(s, 7600)
 
   if fullPath.startsWith(home & "/"):
     if lt == lq: s += 600
@@ -684,9 +688,9 @@ proc buildSearchActions(rest: string): seq[Action] =
   var paths: seq[string]
   if lastSearchQuery.len > 0 and rest.len >= lastSearchQuery.len and
      rest.startsWith(lastSearchQuery) and lastSearchResults.len > 0:
-    for p in lastSearchResults:
-      if p.toLowerAscii.contains(restLower):
-        paths.add p
+    ## Reuse cached results and rely on fuzzy scoring instead of substring filter,
+    ## so minor typos still surface.
+    paths = lastSearchResults
   else:
     paths = scanFilesFast(rest)
 

@@ -1,12 +1,11 @@
 ## settings.nim — config/theme loading for NimLaunch SDL2.
 
-import std/[os, strutils, options]
+import std/[os, strutils, math, options]
 import parsetoml as toml
 import ./[state as st, gui, utils]
 
 var
   baseMatchFgColorHex = ""     ## default fallback for match highlight colour
-  currentThemeIndex = 0        ## active theme index in `themeList`
 
 proc applyTheme*(cfg: var Config; name: string) =
   ## Set theme fields from `themeList` by name; respect explicit match color.
@@ -26,7 +25,6 @@ proc applyTheme*(cfg: var Config; name: string) =
       else:
         cfg.matchFgColorHex = fallbackMatch
       cfg.themeName = th.name
-      currentThemeIndex = i
       break
 
 proc updateParsedColors*(cfg: var Config) =
@@ -169,6 +167,7 @@ proc initLauncherConfig*() =
   st.config.fontName = "DejaVu Sans:size=12"
   st.config.prompt = "> "
   st.config.cursor = "_"
+  st.config.opacity = 1.0
   st.config.terminalExe = "gnome-terminal"
   st.config.borderWidth = 2
   st.config.matchFgColorHex = "#f8c291"
@@ -197,6 +196,7 @@ proc initLauncherConfig*() =
       st.config.positionX = w.getOrDefault("position_x").getInt(st.config.positionX)
       st.config.positionY = w.getOrDefault("position_y").getInt(st.config.positionY)
       st.config.verticalAlign = w.getOrDefault("vertical_align").getStr(st.config.verticalAlign)
+      st.config.opacity = w.getOrDefault("opacity").getFloat(st.config.opacity)
     except CatchableError:
       echo "NimLaunch warning: ignoring invalid [window] section in ", cfgPath
 
@@ -292,6 +292,7 @@ proc initLauncherConfig*() =
   ## guard rails for config values that affect layout/search limits
   if st.config.maxVisibleItems < 1:
     st.config.maxVisibleItems = 1
+  st.config.opacity = clamp(st.config.opacity, 0.1, 1.0)
 
   ## derived geometry
   st.config.winMaxHeight = 40 + st.config.maxVisibleItems * st.config.lineHeight
