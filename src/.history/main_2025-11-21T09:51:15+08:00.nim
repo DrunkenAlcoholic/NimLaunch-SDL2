@@ -51,34 +51,28 @@ proc handleVimCommandKey(sym: cint; ctrlHeld: bool; suppressText: var bool): boo
       suppressText = true
       return true
     if sym == K_ESCAPE:
-      let restore = vimCommandBuffer.len == 0
-      closeVimCommand(restoreInput = restore, preserveBuffer = true)
+      closeVimCommand(restoreInput = true, preserveBuffer = true)
       suppressText = true
       return true
     ## Printable characters are handled by TextInput; do not block.
     false
 
-proc openVimCommandForTrigger(text: string; shiftHeld: bool; suppressText: var bool): bool =
-  ## Open the Vim command bar for '/', ':' or '!'. Return true if consumed.
-  if text.len == 0:
-    return false
-  let trigger = if text[0] == ';' and shiftHeld: ':' else: text[0]
-  case trigger
-  of '/':
-    openVimCommand("")
-  of ':':
-    openVimCommand(":")
-  of '!':
-    openVimCommand("!")
-  else:
-    return false
-  suppressText = true
-  true
-
 proc handleVimNormalKey(sym: cint; text: string; modState: int16; suppressText: var bool): bool =
   ## Handle Vim-mode nav/open keys when not in command-line. Return true if consumed.
   let shiftHeld = (modState and ShiftMask) != 0
   case sym
+  of K_SLASH:
+    openVimCommand("")
+    suppressText = true
+    true
+  of K_COLON:
+    openVimCommand(":")
+    suppressText = true
+    true
+  of K_EXCLAIM:
+    openVimCommand("!")
+    suppressText = true
+    true
   of K_g:
     if shiftHeld:
       vimPendingG = false
@@ -115,7 +109,17 @@ proc handleVimNormalKey(sym: cint; text: string; modState: int16; suppressText: 
     suppressText = true
     true
   else:
-    if openVimCommandForTrigger(text, shiftHeld, suppressText):
+    if text == ":":
+      openVimCommand(":")
+      suppressText = true
+      return true
+    elif text == "!":
+      openVimCommand("!")
+      suppressText = true
+      return true
+    elif text == "/":
+      openVimCommand("")
+      suppressText = true
       return true
     elif text.len > 0:
       vimPendingG = false

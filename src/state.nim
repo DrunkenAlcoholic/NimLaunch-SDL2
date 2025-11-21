@@ -118,7 +118,6 @@ var
   shouldExit*: bool
   benchMode*: bool = false          ## `--bench` flag (minimal redraws)
   recentApps*: seq[string]          ## most-recent-first app names
-  seenMapNotify*: bool = false      ## unused in SDL; kept for parity
   themeList*: seq[Theme]
   matchSpans*: seq[seq[(int, int)]] ## per row: (start,len) spans to highlight
   shortcuts*: seq[Shortcut]
@@ -163,7 +162,7 @@ position_y = 500                  # Y position in pixels when center=false
 vertical_align = "one-third"      # Only used when center=true; "top", "center", or "one-third"
 
 [font]
-fontname = "Noto Sans:size=12"    # Font name & size (Xft format: "Font Family:size=N")
+fontname = "Dejavu:size=16"    # Font name & size (Xft format: "Font Family:size=N")
 
 [input]
 prompt = "> "                     # Prompt prefix shown before your query

@@ -19,22 +19,17 @@ proc shellQuote*(s: string): string =
   result.add("'")
 
 # ── Colour helpers ──────────────────────────────────────────────────────
-## Parse "#RRGGBB" into 8-bit channels; returns false on bad input.
-proc hexToRgb8*(hex: string; r, g, b: var int): bool =
-  if hex.len != 7 or hex[0] != '#': return false
-  try:
-    r = parseHexInt(hex[1..2])
-    g = parseHexInt(hex[3..4])
-    b = parseHexInt(hex[5..6])
-    true
-  except:
-    false
-
 proc parseHexRgb8*(hex: string): Option[Rgb] =
-  var r, g, b: int
-  if not hexToRgb8(hex, r, g, b):
+  ## Parse "#RRGGBB" into Rgb; return none on bad input.
+  if hex.len != 7 or hex[0] != '#':
     return none(Rgb)
-  some(Rgb(r: uint8(r), g: uint8(g), b: uint8(b)))
+  try:
+    let r = parseHexInt(hex[1..2])
+    let g = parseHexInt(hex[3..4])
+    let b = parseHexInt(hex[5..6])
+    some(Rgb(r: uint8(r), g: uint8(g), b: uint8(b)))
+  except:
+    none(Rgb)
 
 # ── Executable / terminal helpers ───────────────────────────────────────
 ## Try to start each candidate executable with arguments; return true on success.
