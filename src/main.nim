@@ -1,6 +1,6 @@
 import std/[os, strutils]
 import sdl2
-import ./[state, app_core, gui, utils]
+import ./[state, app_core, gui, utils, settings]
 
 const
   CtrlMask = 0x00C0'i16

@@ -18,6 +18,11 @@ proc shellQuote*(s: string): string =
       result.add(ch)
   result.add("'")
 
+proc normalizePrefix*(prefix: string): string =
+  ## Canonicalise user-configured prefixes by trimming colons/whitespace and
+  ## lowercasing so parsing is resilient to variants like ":g", "g:" or ":G:".
+  prefix.strip(chars = Whitespace + {':'}).toLowerAscii
+
 # ── Colour helpers ──────────────────────────────────────────────────────
 proc parseHexRgb8*(hex: string): Option[Rgb] =
   ## Parse "#RRGGBB" into Rgb; return none on bad input.
