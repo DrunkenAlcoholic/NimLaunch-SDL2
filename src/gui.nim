@@ -22,6 +22,7 @@ type
     fontBold: FontPtr
     fontOverlay: FontPtr
     iconCache: Table[string, IconTexture]
+    windowShown: bool
 
 var st: BackendState
 
@@ -154,7 +155,7 @@ proc initGui*() =
       if config.centerWindow: SDL_WINDOWPOS_CENTERED else: cint(config.positionY),
       cint(config.winWidth),
       cint(config.winMaxHeight),
-      SDL_WINDOW_SHOWN or SDL_WINDOW_BORDERLESS
+      SDL_WINDOW_HIDDEN or SDL_WINDOW_BORDERLESS
     )
   )
   if st.window.isNil:
@@ -544,11 +545,23 @@ proc redrawWindow*() =
     barRect.h = barHeight.cint
     discard st.renderer.setDrawColor(colHighlightBg.r, colHighlightBg.g, colHighlightBg.b, 255'u8)
     discard st.renderer.fillRect(addr barRect)
-    if vimCommandBuffer.len > 0:
-      let tex = renderText(st.font, vimCommandBuffer, colHighlightFg)
+    var textX = 12
+    if vimCommandPrefix.len > 0:
+      let prefixTex = renderText(st.font, vimCommandPrefix, colHighlightFg)
+      if not prefixTex.isNil:
+        var pDst: Rect
+        pDst.x = textX.cint
+        discard queryTexture(prefixTex, nil, nil, addr pDst.w, addr pDst.h)
+        pDst.y = cint(barTop + (barHeight - pDst.h.int) div 2)
+        textX = pDst.x + pDst.w + 4
+        discard st.renderer.copy(prefixTex, nil, addr pDst)
+        prefixTex.destroy()
+    let barText = vimCommandBuffer
+    if barText.len > 0:
+      let tex = renderText(st.font, barText, colHighlightFg)
       if not tex.isNil:
         var dst: Rect
-        dst.x = 12
+        dst.x = textX.cint
         discard queryTexture(tex, nil, nil, addr dst.w, addr dst.h)
         dst.y = cint(barTop + (barHeight - dst.h.int) div 2)
         discard st.renderer.copy(tex, nil, addr dst)
@@ -564,5 +577,10 @@ proc redrawWindow*() =
       rect.w = cint(config.winWidth - 1 - i * 2)
       rect.h = cint(config.winMaxHeight - 1 - i * 2)
       discard st.renderer.drawRect(addr rect)
+
+  ## Show the window right before the first present so the pre-rendered frame appears immediately.
+  if not st.windowShown:
+    showWindow(st.window)
+    st.windowShown = true
 
   st.renderer.present()

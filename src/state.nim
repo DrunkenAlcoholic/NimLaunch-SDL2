@@ -127,6 +127,7 @@ var
   vimLastSearchBuffer*: string
   vimPendingG*: bool = false
   vimCommandActive*: bool = false
+  vimCommandPrefix*: string = ""     ## leading ":" or "!" while in Vim command-line
   vimSavedInput*: string              ## original query before opening Vim command line
   vimSavedSelectedIndex*: int = 0     ## selection to restore if command is cancelled
   vimSavedViewOffset*: int = 0        ## scroll offset to restore alongside selection

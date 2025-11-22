@@ -980,7 +980,7 @@ proc jumpToBottom*() =
   updateThemePreview()
 
 proc syncVimCommand() =
-  inputText = vimCommandBuffer
+  inputText = vimCommandPrefix & vimCommandBuffer
   lastInputChangeMs = gui.nowMs()
   buildActions()
 
@@ -990,10 +990,18 @@ proc openVimCommand*(initial: string = "") =
     vimSavedSelectedIndex = selectedIndex
     vimSavedViewOffset = viewOffset
     vimCommandRestorePending = true
-  if initial.len == 0 and vimLastSearchBuffer.len > 0:
-    vimCommandBuffer = vimLastSearchBuffer
+  if initial.len > 0 and (initial[0] == ':' or initial[0] == '!'):
+    vimCommandPrefix = initial[0 .. 0]
+    if initial.len > 1:
+      vimCommandBuffer = initial[1 .. ^1]
+    else:
+      vimCommandBuffer.setLen(0)
   else:
-    vimCommandBuffer = initial
+    vimCommandPrefix = ""
+    if initial.len == 0 and vimLastSearchBuffer.len > 0:
+      vimCommandBuffer = vimLastSearchBuffer
+    else:
+      vimCommandBuffer = initial
   vimCommandActive = true
   vimPendingG = false
   syncVimCommand()
@@ -1002,12 +1010,13 @@ proc closeVimCommand*(restoreInput = false; preserveBuffer = false) =
   let savedInput = vimSavedInput
   let savedSelected = vimSavedSelectedIndex
   let savedOffset = vimSavedViewOffset
-  let savedBuffer = vimCommandBuffer
+  let savedBuffer = vimCommandPrefix & vimCommandBuffer
   if savedBuffer.len == 0:
     vimLastSearchBuffer = ""
   elif preserveBuffer and (savedBuffer[0] != ':' and savedBuffer[0] != '!'):
     vimLastSearchBuffer = savedBuffer
   vimCommandBuffer.setLen(0)
+  vimCommandPrefix = ""
   vimCommandActive = false
   vimPendingG = false
 
@@ -1039,7 +1048,7 @@ proc closeVimCommand*(restoreInput = false; preserveBuffer = false) =
 
 
 proc executeVimCommand*() =
-  let trimmed = vimCommandBuffer.strip()
+  let trimmed = (vimCommandPrefix & vimCommandBuffer).strip()
   closeVimCommand(preserveBuffer = false)
   if trimmed.len == 0:
     return

@@ -28,7 +28,7 @@ proc handleVimCommandKey(sym: cint; ctrlHeld: bool; suppressText: var bool): boo
   of K_BACKSPACE, K_DELETE:
     if vimCommandBuffer.len > 0:
       vimCommandBuffer.setLen(vimCommandBuffer.len - 1)
-      inputText = vimCommandBuffer
+      inputText = vimCommandPrefix & vimCommandBuffer
       buildActions()
     else:
       closeVimCommand(restoreInput = true, preserveBuffer = false)
@@ -38,7 +38,7 @@ proc handleVimCommandKey(sym: cint; ctrlHeld: bool; suppressText: var bool): boo
     if ctrlHeld and sym == K_h:
       if vimCommandBuffer.len > 0:
         vimCommandBuffer.setLen(vimCommandBuffer.len - 1)
-        inputText = vimCommandBuffer
+        inputText = vimCommandPrefix & vimCommandBuffer
         buildActions()
       else:
         closeVimCommand(restoreInput = true, preserveBuffer = false)
@@ -46,7 +46,7 @@ proc handleVimCommandKey(sym: cint; ctrlHeld: bool; suppressText: var bool): boo
       return true
     if ctrlHeld and sym == K_u:
       vimCommandBuffer.setLen(0)
-      inputText = vimCommandBuffer
+      inputText = vimCommandPrefix & vimCommandBuffer
       buildActions()
       suppressText = true
       return true
@@ -134,7 +134,7 @@ proc appendTextInput(txt: string) =
   if txt.len == 0: return
   if config.vimMode and vimCommandActive:
     vimCommandBuffer.add(txt)
-    inputText = vimCommandBuffer
+    inputText = vimCommandPrefix & vimCommandBuffer
   else:
     inputText.add(txt)
   lastInputChangeMs = gui.nowMs()
