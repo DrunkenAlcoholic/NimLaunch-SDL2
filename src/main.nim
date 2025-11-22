@@ -26,32 +26,29 @@ proc handleVimCommandKey(sym: cint; ctrlHeld: bool; suppressText: var bool): boo
     suppressText = true
     true
   of K_BACKSPACE, K_DELETE:
-    if vimCommandBuffer.len > 0:
-      vimCommandBuffer.setLen(vimCommandBuffer.len - 1)
-      inputText = vimCommandPrefix & vimCommandBuffer
-      buildActions()
+    if vim.buffer.len > 0:
+      vim.buffer.setLen(vim.buffer.len - 1)
+      syncVimCommand()
     else:
       closeVimCommand(restoreInput = true, preserveBuffer = false)
     suppressText = true
     true
   else:
     if ctrlHeld and sym == K_h:
-      if vimCommandBuffer.len > 0:
-        vimCommandBuffer.setLen(vimCommandBuffer.len - 1)
-        inputText = vimCommandPrefix & vimCommandBuffer
-        buildActions()
+      if vim.buffer.len > 0:
+        vim.buffer.setLen(vim.buffer.len - 1)
+        syncVimCommand()
       else:
         closeVimCommand(restoreInput = true, preserveBuffer = false)
       suppressText = true
       return true
     if ctrlHeld and sym == K_u:
-      vimCommandBuffer.setLen(0)
-      inputText = vimCommandPrefix & vimCommandBuffer
-      buildActions()
+      vim.buffer.setLen(0)
+      syncVimCommand()
       suppressText = true
       return true
     if sym == K_ESCAPE:
-      let restore = vimCommandBuffer.len == 0
+      let restore = vim.buffer.len == 0
       closeVimCommand(restoreInput = restore, preserveBuffer = true)
       suppressText = true
       return true
@@ -81,32 +78,32 @@ proc handleVimNormalKey(sym: cint; text: string; modState: int16; suppressText: 
   case sym
   of K_g:
     if shiftHeld:
-      vimPendingG = false
+      vim.pendingG = false
       jumpToBottom()
-    elif vimPendingG:
-      vimPendingG = false
+    elif vim.pendingG:
+      vim.pendingG = false
       jumpToTop()
     else:
-      vimPendingG = true
+      vim.pendingG = true
     suppressText = true
     true
   of K_j:
-    vimPendingG = false
+    vim.pendingG = false
     moveSelectionBy(1)
     suppressText = true
     true
   of K_k:
-    vimPendingG = false
+    vim.pendingG = false
     moveSelectionBy(-1)
     suppressText = true
     true
   of K_h:
-    vimPendingG = false
+    vim.pendingG = false
     deleteLastInputChar()
     suppressText = true
     true
   of K_l:
-    vimPendingG = false
+    vim.pendingG = false
     activateCurrentSelection()
     suppressText = true
     true
@@ -118,27 +115,120 @@ proc handleVimNormalKey(sym: cint; text: string; modState: int16; suppressText: 
     if openVimCommandForTrigger(text, shiftHeld, suppressText):
       return true
     elif text.len > 0:
-      vimPendingG = false
+      vim.pendingG = false
       suppressText = true
       return true
-    vimPendingG = false
+    vim.pendingG = false
     false
 
 proc handleVimKey(sym: cint; text: string; modState: int16; suppressText: var bool) =
-  if vimCommandActive:
+  if vim.active:
     discard handleVimCommandKey(sym, (modState and CtrlMask) != 0, suppressText)
   else:
     discard handleVimNormalKey(sym, text, modState, suppressText)
 
 proc appendTextInput(txt: string) =
   if txt.len == 0: return
-  if config.vimMode and vimCommandActive:
-    vimCommandBuffer.add(txt)
-    inputText = vimCommandPrefix & vimCommandBuffer
+  if config.vimMode and vim.active:
+    vim.buffer.add(txt)
+    syncVimCommand()
   else:
     inputText.add(txt)
   lastInputChangeMs = gui.nowMs()
   buildActions()
+
+proc handleWindowEvent(ev: Event; focus: var FocusState) =
+  case ev.window.event
+  of WindowEvent_FocusGained:
+    focus.hadFocus = true
+    focus.lastGainMs = gui.nowMs()
+  of WindowEvent_FocusLost, WindowEvent_Hidden, WindowEvent_Minimized:
+    if shouldExitOnFocusLoss(focus):
+      shouldExit = true
+  else:
+    discard
+
+proc handleKeyDown(ev: Event; focus: var FocusState; suppressNextTextInput: var bool): bool =
+  let sym = ev.key.keysym.sym
+  let modState = ev.key.keysym.modstate
+  var handled = false
+  var text = ""
+  let code = sym.int
+  if code >= 32 and code <= 126:
+    text = $(chr(code))
+  focus.hadFocus = true
+
+  if config.vimMode:
+    handleVimKey(sym, text, modState, suppressNextTextInput)
+    handled = suppressNextTextInput
+  elif sym == K_u and ((modState and CtrlMask) != 0):
+    clearInput()
+    handled = true
+  elif sym == K_h and ((modState and CtrlMask) != 0):
+    deleteLastInputChar()
+    handled = true
+  else:
+    case sym
+    of K_ESCAPE:
+      shouldExit = true
+      handled = true
+    of K_RETURN:
+      activateCurrentSelection()
+      handled = true
+    of K_BACKSPACE:
+      deleteLastInputChar()
+      handled = true
+    of K_LEFT:
+      deleteLastInputChar()
+      handled = true
+    of K_RIGHT:
+      discard
+    of K_UP:
+      moveSelectionBy(-1)
+      handled = true
+    of K_DOWN:
+      moveSelectionBy(1)
+      handled = true
+    of K_PAGEUP:
+      if filteredApps.len > 0:
+        moveSelectionBy(-max(1, config.maxVisibleItems))
+      handled = true
+    of K_PAGEDOWN:
+      if filteredApps.len > 0:
+        moveSelectionBy(max(1, config.maxVisibleItems))
+      handled = true
+    of K_HOME:
+      jumpToTop()
+      handled = true
+    of K_END:
+      jumpToBottom()
+      handled = true
+    else:
+      discard
+
+  handled
+
+proc handleTextInput(ev: Event; focus: var FocusState; suppressNextTextInput: var bool): bool =
+  if suppressNextTextInput:
+    suppressNextTextInput = false
+    return false
+  let s = $cast[cstring](addr ev.text.text[0])
+  focus.hadFocus = true
+  appendTextInput(s)
+  true
+
+proc processSearchDebounce(): bool =
+  ## Debounce wake-up: if we're in s: search, rebuild after idle.
+  let (cmd, rest, _) = parseCommand(inputText)
+  if cmd != ckSearch:
+    return false
+  let sinceEdit = gui.nowMs() - lastInputChangeMs
+  if rest.len >= 2 and sinceEdit >= SearchDebounceMs and
+     lastSearchBuildMs < lastInputChangeMs:
+    lastSearchBuildMs = gui.nowMs()
+    buildActions()
+    return true
+  false
 
 proc main() =
   if not ensureSingleInstance():
@@ -151,9 +241,7 @@ proc main() =
   timeIt "Load Recent Apps:": loadRecent()
   timeIt "Build Actions:": buildActions()
 
-  vimPendingG = false
-  vimCommandBuffer.setLen(0)
-  vimCommandActive = false
+  resetVimState()
 
   gui.initGui()
   timeIt "updateParsedColors:": updateParsedColors(config)
@@ -174,99 +262,22 @@ proc main() =
       of QuitEvent:
         shouldExit = true
       of WindowEvent:
-        case ev.window.event
-        of WindowEvent_FocusGained:
-          focus.hadFocus = true
-          focus.lastGainMs = gui.nowMs()
-        of WindowEvent_FocusLost, WindowEvent_Hidden, WindowEvent_Minimized:
-          if shouldExitOnFocusLoss(focus):
-            shouldExit = true
-        else:
-          discard
+        handleWindowEvent(ev, focus)
       of KeyDown:
-        let sym = ev.key.keysym.sym
-        let modState = ev.key.keysym.modstate
-        var handled = false
-        var text = ""
-        let code = sym.int
-        if code >= 32 and code <= 126:
-          text = $(chr(code))
-        focus.hadFocus = true
-
-        if config.vimMode:
-          handleVimKey(sym, text, modState, suppressNextTextInput)
-          handled = suppressNextTextInput
-        elif sym == K_u and ((modState and CtrlMask) != 0):
-          clearInput()
-          handled = true
-        elif sym == K_h and ((modState and CtrlMask) != 0):
-          deleteLastInputChar()
-          handled = true
-        else:
-          case sym
-          of K_ESCAPE:
-            shouldExit = true
-            handled = true
-          of K_RETURN:
-            activateCurrentSelection()
-            handled = true
-          of K_BACKSPACE:
-            deleteLastInputChar()
-            handled = true
-          of K_LEFT:
-            deleteLastInputChar()
-            handled = true
-          of K_RIGHT:
-            discard
-          of K_UP:
-            moveSelectionBy(-1)
-            handled = true
-          of K_DOWN:
-            moveSelectionBy(1)
-            handled = true
-          of K_PAGEUP:
-            if filteredApps.len > 0:
-              moveSelectionBy(-max(1, config.maxVisibleItems))
-            handled = true
-          of K_PAGEDOWN:
-            if filteredApps.len > 0:
-              moveSelectionBy(max(1, config.maxVisibleItems))
-            handled = true
-          of K_HOME:
-            jumpToTop()
-            handled = true
-          of K_END:
-            jumpToBottom()
-            handled = true
-          else:
-            discard
-
-        if handled:
+        if handleKeyDown(ev, focus, suppressNextTextInput):
           gui.redrawWindow()
 
       of TextInput:
-        if suppressNextTextInput:
-          suppressNextTextInput = false
-          continue
-        let s = $cast[cstring](addr ev.text.text[0])
-        focus.hadFocus = true
-        appendTextInput(s)
-        gui.redrawWindow()
+        if handleTextInput(ev, focus, suppressNextTextInput):
+          gui.redrawWindow()
       else:
         discard
 
     if shouldExit: break
 
-    ## Debounce wake-up: if we're in s: search, rebuild after idle
-    let (cmd, rest, _) = parseCommand(inputText)
-    if cmd == ckSearch:
-      let sinceEdit = gui.nowMs() - lastInputChangeMs
-      if rest.len >= 2 and sinceEdit >= SearchDebounceMs and
-         lastSearchBuildMs < lastInputChangeMs:
-        lastSearchBuildMs = gui.nowMs()
-        buildActions()
-        gui.redrawWindow()
-        continue
+    if processSearchDebounce():
+      gui.redrawWindow()
+      continue
 
     delay(10)
 

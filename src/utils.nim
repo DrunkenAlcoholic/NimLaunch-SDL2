@@ -5,7 +5,7 @@
 ##   • recent-application JSON persistence
 
 import std/[os, osproc, strutils, times, json, options]
-import ./[state, parser]
+import ./[state, parser, paths]
 
 # ── Shell helpers ───────────────────────────────────────────────────────
 ## Quote a string for safe use inside a POSIX shell single-quoted context.
@@ -141,7 +141,7 @@ template timeIt*(msg: string; body: untyped) =
     echo msg, " ", elapsed.formatFloat(ffDecimal, 3), " ms"
 
 # ── Recent/MRU (applications) persistence ───────────────────────────────
-let recentFile* = getHomeDir() / ".cache" / "nimlaunch" / "recent.json"
+let recentFile* = cacheDir() / "recent.json"
 
 proc loadRecent*() =
   ## Populate state.recentApps from disk; log on error.

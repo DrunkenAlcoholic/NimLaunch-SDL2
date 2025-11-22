@@ -2,7 +2,7 @@
 
 import std/[os, strutils, math, options]
 import parsetoml as toml
-import ./[state as st, gui, utils]
+import ./[state as st, gui, utils, paths]
 
 var
   baseMatchFgColorHex = ""     ## default fallback for match highlight colour
@@ -176,7 +176,7 @@ proc initLauncherConfig*() =
   st.config.showIcons = true
 
   ## Ensure TOML exists
-  let cfgDir = getHomeDir() / ".config" / "nimlaunch"
+  let cfgDir = configDir()
   let cfgPath = cfgDir / "nimlaunch.toml"
   if not fileExists(cfgPath):
     createDir(cfgDir)

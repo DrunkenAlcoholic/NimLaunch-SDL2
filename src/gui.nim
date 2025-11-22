@@ -5,7 +5,7 @@ import std/[os, strutils, times, tables, streams, osproc]
 import sdl2
 import sdl2/ttf
 import sdl2/image
-import ./state
+import ./[state, paths]
 
 when not declared(setWindowOpacity):
   proc setWindowOpacity(window: WindowPtr; opacity: cfloat): cint {.cdecl, importc: "SDL_SetWindowOpacity", dynlib: LibName.}
@@ -235,7 +235,7 @@ proc rasterizeSvg(svgPath: string; size: int): string =
   ## Convert an SVG icon to a cached PNG using rsvg-convert; returns cache path or "".
   let exe = findExe("rsvg-convert")
   if exe.len == 0: return ""
-  let cacheDir = getHomeDir() / ".cache" / "nimlaunch" / "icons" / $size
+  let cacheDir = iconCacheDir(size)
   try: createDir(cacheDir) except CatchableError: discard
   let base = svgPath.extractFilename
   let outPath = cacheDir / (base & ".png")
@@ -511,15 +511,7 @@ proc drawClock(topRight = false) =
   discard st.renderer.copy(tex, nil, addr dst)
   tex.destroy()
 
-proc redrawWindow*() =
-  if st.isNil: return
-
-  discard st.renderer.setDrawColor(colBg.r, colBg.g, colBg.b, colBg.a)
-  discard st.renderer.clear()
-
-  var y = 10
-  let commandActive = config.vimMode and vimCommandActive
-
+proc drawPromptAndInput(y: var int) =
   # Prompt + input line (hidden in Vim mode to mirror original)
   if not config.vimMode:
     let promptLine = config.prompt & inputText & config.cursor
@@ -528,7 +520,8 @@ proc redrawWindow*() =
   else:
     y += 2
 
-  # Visible rows
+proc drawVisibleRows(startY: int): int =
+  var y = startY
   let total = filteredApps.len
   let maxRows = config.maxVisibleItems
   let start = viewOffset
@@ -538,8 +531,9 @@ proc redrawWindow*() =
     let selected = (idx == selectedIndex)
     drawText(12, y, row.text, matchSpans[idx], selected, row.iconName)
     y += config.lineHeight
+  y
 
-  # Theme / status / clock
+proc drawOverlays() =
   if themePreviewActive:
     drawThemeOverlay()
   else:
@@ -549,52 +543,54 @@ proc redrawWindow*() =
   else:
     drawClock()
 
-  ## Vim command bar (bottom)
-  if commandActive:
-    let barHeight = config.lineHeight + 6
-    var barTop = config.winMaxHeight - barHeight - 4
-    if barTop < 0: barTop = 0
-    var barRect: Rect
-    barRect.x = 0
-    barRect.y = barTop.cint
-    barRect.w = config.winWidth.cint
-    barRect.h = barHeight.cint
-    discard st.renderer.setDrawColor(colHighlightBg.r, colHighlightBg.g, colHighlightBg.b, 255'u8)
-    discard st.renderer.fillRect(addr barRect)
-    var textX = 12
-    if vimCommandPrefix.len > 0:
-      let prefixTex = renderText(st.font, vimCommandPrefix, colHighlightFg)
-      if not prefixTex.isNil:
-        var pDst: Rect
-        pDst.x = textX.cint
-        discard queryTexture(prefixTex, nil, nil, addr pDst.w, addr pDst.h)
-        pDst.y = cint(barTop + (barHeight - pDst.h.int) div 2)
-        textX = pDst.x + pDst.w + 4
-        discard st.renderer.copy(prefixTex, nil, addr pDst)
-        prefixTex.destroy()
-    let barText = vimCommandBuffer
-    if barText.len > 0:
-      let tex = renderText(st.font, barText, colHighlightFg)
-      if not tex.isNil:
-        var dst: Rect
-        dst.x = textX.cint
-        discard queryTexture(tex, nil, nil, addr dst.w, addr dst.h)
-        dst.y = cint(barTop + (barHeight - dst.h.int) div 2)
-        discard st.renderer.copy(tex, nil, addr dst)
-        tex.destroy()
+proc drawCommandBar() =
+  if not (config.vimMode and vim.active):
+    return
+  let barHeight = config.lineHeight + 6
+  var barTop = config.winMaxHeight - barHeight - 4
+  if barTop < 0: barTop = 0
+  var barRect: Rect
+  barRect.x = 0
+  barRect.y = barTop.cint
+  barRect.w = config.winWidth.cint
+  barRect.h = barHeight.cint
+  discard st.renderer.setDrawColor(colHighlightBg.r, colHighlightBg.g, colHighlightBg.b, 255'u8)
+  discard st.renderer.fillRect(addr barRect)
+  var textX = 12
+  if vim.prefix.len > 0:
+    let prefixTex = renderText(st.font, vim.prefix, colHighlightFg)
+    if not prefixTex.isNil:
+      var pDst: Rect
+      pDst.x = textX.cint
+      discard queryTexture(prefixTex, nil, nil, addr pDst.w, addr pDst.h)
+      pDst.y = cint(barTop + (barHeight - pDst.h.int) div 2)
+      textX = pDst.x + pDst.w + 4
+      discard st.renderer.copy(prefixTex, nil, addr pDst)
+      prefixTex.destroy()
+  let barText = vim.buffer
+  if barText.len > 0:
+    let tex = renderText(st.font, barText, colHighlightFg)
+    if not tex.isNil:
+      var dst: Rect
+      dst.x = textX.cint
+      discard queryTexture(tex, nil, nil, addr dst.w, addr dst.h)
+      dst.y = cint(barTop + (barHeight - dst.h.int) div 2)
+      discard st.renderer.copy(tex, nil, addr dst)
+      tex.destroy()
 
-  # Border
-  if config.borderWidth > 0:
-    discard st.renderer.setDrawColor(colBorder.r, colBorder.g, colBorder.b, 255'u8)
-    for i in 0 ..< config.borderWidth:
-      var rect: Rect
-      rect.x = cint(i)
-      rect.y = cint(i)
-      rect.w = cint(config.winWidth - 1 - i * 2)
-      rect.h = cint(config.winMaxHeight - 1 - i * 2)
-      discard st.renderer.drawRect(addr rect)
+proc drawBorder() =
+  if config.borderWidth <= 0:
+    return
+  discard st.renderer.setDrawColor(colBorder.r, colBorder.g, colBorder.b, 255'u8)
+  for i in 0 ..< config.borderWidth:
+    var rect: Rect
+    rect.x = cint(i)
+    rect.y = cint(i)
+    rect.w = cint(config.winWidth - 1 - i * 2)
+    rect.h = cint(config.winMaxHeight - 1 - i * 2)
+    discard st.renderer.drawRect(addr rect)
 
-  ## Show the window right before the first present so the pre-rendered frame appears immediately.
+proc presentFrame() =
   if not st.windowShown:
     showWindow(st.window)
     st.windowShown = true
@@ -605,5 +601,18 @@ proc redrawWindow*() =
       discard setWindowAlwaysOnTop(st.window, 1)
       discard setWindowAlwaysOnTop(st.window, 0)
     st.windowRaised = true
-
   st.renderer.present()
+
+proc redrawWindow*() =
+  if st.isNil: return
+
+  discard st.renderer.setDrawColor(colBg.r, colBg.g, colBg.b, colBg.a)
+  discard st.renderer.clear()
+
+  var y = 10
+  drawPromptAndInput(y)
+  discard drawVisibleRows(y)
+  drawOverlays()
+  drawCommandBar()
+  drawBorder()
+  presentFrame()

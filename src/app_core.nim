@@ -4,7 +4,7 @@ import std/[os, osproc, strutils, options, tables, sequtils, json, uri, sets,
             algorithm, times, heapqueue, streams, exitprocs]
 when defined(posix):
   import posix
-import ./[state, parser, gui, utils, settings]
+import ./[state, parser, gui, utils, settings, paths]
 
 when defined(posix):
   when not declared(flock):
@@ -24,7 +24,7 @@ const
   SearchDebounceMs* = 240   # debounce for s: while typing (unified)
   SearchFdCap      = 800    # cap external search results from fd/locate
   SearchShowCap    = 250    # cap items we score per rebuild
-  CacheFormatVersion = 3
+  CacheFormatVersion = 4
   iconAliases = {
     "code": "visual-studio-code",
     "codium": "vscodium",
@@ -90,12 +90,12 @@ when defined(posix):
 
   proc ensureSingleInstance*(): bool =
     ## Obtain an exclusive advisory lock; return false if another instance owns it.
-    let cacheDir = getHomeDir() / ".cache" / "nimlaunch"
+    let cacheDirPath = cacheDir()
     try:
-      createDir(cacheDir)
+      createDir(cacheDirPath)
     except CatchableError:
       discard
-    lockFilePath = cacheDir / "nimlaunch.lock"
+    lockFilePath = cacheDirPath / "nimlaunch.lock"
 
     let fd = open(lockFilePath.cstring, O_RDWR or O_CREAT, 0o664)
     if fd < 0:
@@ -124,12 +124,12 @@ else:
 
   proc ensureSingleInstance*(): bool =
     ## Basic file sentinel fallback for non-POSIX targets.
-    let cacheDir = getHomeDir() / ".cache" / "nimlaunch"
+    let cacheDirPath = cacheDir()
     try:
-      createDir(cacheDir)
+      createDir(cacheDirPath)
     except CatchableError:
       discard
-    lockFilePath = cacheDir / "nimlaunch.lock"
+    lockFilePath = cacheDirPath / "nimlaunch.lock"
 
     if fileExists(lockFilePath):
       return false
@@ -290,7 +290,7 @@ proc scanFilesFast*(query: string): seq[string] =
 proc refreshConfigFiles() =
   ## Build the cached ~/.config file list once per run.
   configFilesCache.setLen(0)
-  let base = getHomeDir() / ".config"
+  let base = userConfigHome()
   try:
     for path in walkDirRec(base, yieldFilter = {pcFile}):
       let fn = path.extractFilename
@@ -321,27 +321,19 @@ proc newestDesktopMtime(dir: string): int64 =
 
 proc loadApplications*() =
   ## Scan .desktop files with caching to ~/.cache/nimlaunch/apps.json.
-  let usrDir   = "/usr/share/applications"
-  let locDir   = getHomeDir() / ".local/share/applications"
-  let flatpakUserDir = getHomeDir() / ".local/share/flatpak/exports/share/applications"
-  let flatpakSystemDir = "/var/lib/flatpak/exports/share/applications"
-  let cacheDir = getHomeDir() / ".cache" / "nimlaunch"
-  let cacheFile = cacheDir / "apps.json"
+  let appDirs = applicationDirs()
+  let dirMtimes = appDirs.map(newestDesktopMtime)
 
-  let usrM = newestDesktopMtime(usrDir)
-  let locM = newestDesktopMtime(locDir)
-  let flatpakUserM = newestDesktopMtime(flatpakUserDir)
-  let flatpakSystemM = newestDesktopMtime(flatpakSystemDir)
+  let cacheBase = cacheDir()
+  let cacheFile = cacheBase / "apps.json"
 
   if fileExists(cacheFile):
     try:
       let node = parseJson(readFile(cacheFile))
-      if node.kind == JObject and node.hasKey("formatVersion") and
-         node["formatVersion"].getInt == CacheFormatVersion:
+      if node.kind == JObject and node.hasKey("formatVersion"):
         let c = to(node, CacheData)
-        if c.usrMtime == usrM and c.localMtime == locM and
-           c.flatpakUserMtime == flatpakUserM and
-           c.flatpakSystemMtime == flatpakSystemM:
+        if c.formatVersion == CacheFormatVersion and
+           c.appDirs == appDirs and c.dirMtimes == dirMtimes:
           timeIt "Cache hit:":
             allApps = c.apps
             filteredApps = @[]
@@ -354,7 +346,7 @@ proc loadApplications*() =
 
   timeIt "Full scan:":
     var dedup = initTable[string, DesktopApp]()
-    for dir in @[flatpakUserDir, locDir, usrDir, flatpakSystemDir]:
+    for dir in appDirs:
       if not dirExists(dir): continue
       for path in walkDirRec(dir, yieldFilter = {pcFile}):
         if not path.endsWith(".desktop"): continue
@@ -375,14 +367,12 @@ proc loadApplications*() =
     filteredApps = @[]
     matchSpans = @[]
     try:
-      createDir(cacheDir)
+      createDir(cacheBase)
       writeFile(cacheFile, pretty(%CacheData(formatVersion: CacheFormatVersion,
-                                             usrMtime: usrM,
-                                             localMtime: locM,
-                                             flatpakUserMtime: flatpakUserM,
-                                             flatpakSystemMtime: flatpakSystemM,
+                                             appDirs: appDirs,
+                                             dirMtimes: dirMtimes,
                                              apps: allApps)))
-    except:
+    except CatchableError:
       echo "Warning: cache not saved."
 
 # ── Fuzzy match + helpers ───────────────────────────────────────────────
@@ -932,7 +922,7 @@ proc performAction*(a: Action) =
   of akTheme:
     ## Apply and persist, but DO NOT reset selection or exit.
     applyThemeAndColors(config, a.exec, doNotify = false)
-    saveLastTheme(getHomeDir() / ".config" / "nimlaunch" / "nimlaunch.toml")
+    saveLastTheme(configDir() / "nimlaunch.toml")
     endThemePreviewSession(true)
     clearInput()
     gui.redrawWindow()
@@ -979,48 +969,51 @@ proc jumpToBottom*() =
   viewOffset = if start > 0: start else: 0
   updateThemePreview()
 
-proc syncVimCommand() =
-  inputText = vimCommandPrefix & vimCommandBuffer
+proc resetVimState*() =
+  vim = VimCommandState()
+
+proc syncVimCommand*() =
+  inputText = vim.prefix & vim.buffer
   lastInputChangeMs = gui.nowMs()
   buildActions()
 
 proc openVimCommand*(initial: string = "") =
-  if not vimCommandActive:
-    vimSavedInput = inputText
-    vimSavedSelectedIndex = selectedIndex
-    vimSavedViewOffset = viewOffset
-    vimCommandRestorePending = true
+  if not vim.active:
+    vim.savedInput = inputText
+    vim.savedSelectedIndex = selectedIndex
+    vim.savedViewOffset = viewOffset
+    vim.restorePending = true
   if initial.len > 0 and (initial[0] == ':' or initial[0] == '!'):
-    vimCommandPrefix = initial[0 .. 0]
+    vim.prefix = initial[0 .. 0]
     if initial.len > 1:
-      vimCommandBuffer = initial[1 .. ^1]
+      vim.buffer = initial[1 .. ^1]
     else:
-      vimCommandBuffer.setLen(0)
+      vim.buffer.setLen(0)
   else:
-    vimCommandPrefix = ""
-    if initial.len == 0 and vimLastSearchBuffer.len > 0:
-      vimCommandBuffer = vimLastSearchBuffer
+    vim.prefix = ""
+    if initial.len == 0 and vim.lastSearch.len > 0:
+      vim.buffer = vim.lastSearch
     else:
-      vimCommandBuffer = initial
-  vimCommandActive = true
-  vimPendingG = false
+      vim.buffer = initial
+  vim.active = true
+  vim.pendingG = false
   syncVimCommand()
 
 proc closeVimCommand*(restoreInput = false; preserveBuffer = false) =
-  let savedInput = vimSavedInput
-  let savedSelected = vimSavedSelectedIndex
-  let savedOffset = vimSavedViewOffset
-  let savedBuffer = vimCommandPrefix & vimCommandBuffer
+  let savedInput = vim.savedInput
+  let savedSelected = vim.savedSelectedIndex
+  let savedOffset = vim.savedViewOffset
+  let savedBuffer = vim.prefix & vim.buffer
   if savedBuffer.len == 0:
-    vimLastSearchBuffer = ""
+    vim.lastSearch = ""
   elif preserveBuffer and (savedBuffer[0] != ':' and savedBuffer[0] != '!'):
-    vimLastSearchBuffer = savedBuffer
-  vimCommandBuffer.setLen(0)
-  vimCommandPrefix = ""
-  vimCommandActive = false
-  vimPendingG = false
+    vim.lastSearch = savedBuffer
+  vim.buffer.setLen(0)
+  vim.prefix = ""
+  vim.active = false
+  vim.pendingG = false
 
-  if restoreInput and vimCommandRestorePending:
+  if restoreInput and vim.restorePending:
     inputText = savedInput
     lastInputChangeMs = gui.nowMs()
     buildActions()
@@ -1040,15 +1033,15 @@ proc closeVimCommand*(restoreInput = false; preserveBuffer = false) =
       selectedIndex = 0
       viewOffset = 0
 
-  vimSavedInput = ""
-  vimSavedSelectedIndex = 0
-  vimSavedViewOffset = 0
-  vimCommandRestorePending = false
+  vim.savedInput = ""
+  vim.savedSelectedIndex = 0
+  vim.savedViewOffset = 0
+  vim.restorePending = false
 
 
 
 proc executeVimCommand*() =
-  let trimmed = (vimCommandPrefix & vimCommandBuffer).strip()
+  let trimmed = (vim.prefix & vim.buffer).strip()
   closeVimCommand(preserveBuffer = false)
   if trimmed.len == 0:
     return
@@ -1059,6 +1052,6 @@ proc executeVimCommand*() =
   lastInputChangeMs = gui.nowMs()
   buildActions()
   if trimmed.len == 0 or (trimmed[0] != ':' and trimmed[0] != '!'):
-    vimLastSearchBuffer = trimmed
+    vim.lastSearch = trimmed
   if actions.len > 0:
     activateCurrentSelection()

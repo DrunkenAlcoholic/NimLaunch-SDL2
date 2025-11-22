@@ -16,8 +16,8 @@ type
   ## Payload cached to `~/.cache/nimlaunch/apps.json`.
   CacheData* = object
     formatVersion*: int
-    usrMtime*, localMtime*: int64
-    flatpakUserMtime*, flatpakSystemMtime*: int64
+    appDirs*: seq[string]
+    dirMtimes*: seq[int64]
     apps*: seq[DesktopApp]
 
   ## Launcher configuration populated by initLauncherConfig.
@@ -98,6 +98,17 @@ type
     text*: string
     iconName*: string
 
+  VimCommandState* = object
+    prefix*: string
+    buffer*: string
+    lastSearch*: string
+    pendingG*: bool
+    active*: bool
+    savedInput*: string
+    savedSelectedIndex*: int
+    savedViewOffset*: int
+    restorePending*: bool
+
   ## Theme definition (matchFgColorHex is explicit; no "auto" support).
   Theme* = object
     name*: string
@@ -123,15 +134,7 @@ var
   matchSpans*: seq[seq[(int, int)]] ## per row: (start,len) spans to highlight
   shortcuts*: seq[Shortcut]
   powerActions*: seq[PowerAction]
-  vimCommandBuffer*: string
-  vimLastSearchBuffer*: string
-  vimPendingG*: bool = false
-  vimCommandActive*: bool = false
-  vimCommandPrefix*: string = ""     ## leading ":" or "!" while in Vim command-line
-  vimSavedInput*: string              ## original query before opening Vim command line
-  vimSavedSelectedIndex*: int = 0     ## selection to restore if command is cancelled
-  vimSavedViewOffset*: int = 0        ## scroll offset to restore alongside selection
-  vimCommandRestorePending*: bool = false ## true while original state can still be restored
+  vim*: VimCommandState
   themePreviewActive*: bool = false   ## true while :t list is temporarily previewing themes
   themePreviewBaseTheme*: string
   themePreviewCurrent*: string
