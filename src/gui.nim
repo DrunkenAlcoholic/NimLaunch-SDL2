@@ -10,6 +10,18 @@ import ./state
 when not declared(setWindowOpacity):
   proc setWindowOpacity(window: WindowPtr; opacity: cfloat): cint {.cdecl, importc: "SDL_SetWindowOpacity", dynlib: LibName.}
 
+when not declared(SDL_WINDOW_SKIP_TASKBAR):
+  const SDL_WINDOW_SKIP_TASKBAR* = 0x00010000'u32
+
+when not declared(SDL_WINDOW_UTILITY):
+  const SDL_WINDOW_UTILITY* = 0x00020000'u32
+
+when not declared(setWindowAlwaysOnTop):
+  proc setWindowAlwaysOnTop(window: WindowPtr; on: cint): cint {.cdecl, importc: "SDL_SetWindowAlwaysOnTop", dynlib: LibName.}
+
+when not declared(raiseWindow):
+  proc raiseWindow(window: WindowPtr) {.cdecl, importc: "SDL_RaiseWindow", dynlib: LibName.}
+
 type
   IconTexture = ref object
     tex: TexturePtr
@@ -23,6 +35,7 @@ type
     fontOverlay: FontPtr
     iconCache: Table[string, IconTexture]
     windowShown: bool
+    windowRaised: bool
 
 var st: BackendState
 
@@ -148,6 +161,9 @@ proc initGui*() =
   let size = deriveFontSizeFromConfig()
   let fontPath = resolveFontPath(config.fontName)
 
+  ## Request a dock/utility window type so most WMs hide us from the taskbar.
+  discard setHint("SDL_VIDEO_X11_NET_WM_WINDOW_TYPE", "_NET_WM_WINDOW_TYPE_DOCK,_NET_WM_WINDOW_TYPE_UTILITY")
+
   st = BackendState(
     window: createWindow(
       "NimLaunch2 SDL2".cstring,
@@ -155,7 +171,7 @@ proc initGui*() =
       if config.centerWindow: SDL_WINDOWPOS_CENTERED else: cint(config.positionY),
       cint(config.winWidth),
       cint(config.winMaxHeight),
-      SDL_WINDOW_HIDDEN or SDL_WINDOW_BORDERLESS
+      SDL_WINDOW_HIDDEN or SDL_WINDOW_BORDERLESS or SDL_WINDOW_SKIP_TASKBAR or SDL_WINDOW_UTILITY
     )
   )
   if st.window.isNil:
@@ -582,5 +598,12 @@ proc redrawWindow*() =
   if not st.windowShown:
     showWindow(st.window)
     st.windowShown = true
+  if not st.windowRaised:
+    ## Hint most WMs to focus/raise us even when marked as utility/skip-taskbar.
+    raiseWindow(st.window)
+    when declared(setWindowAlwaysOnTop):
+      discard setWindowAlwaysOnTop(st.window, 1)
+      discard setWindowAlwaysOnTop(st.window, 0)
+    st.windowRaised = true
 
   st.renderer.present()
