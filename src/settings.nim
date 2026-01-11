@@ -1,6 +1,6 @@
 ## settings.nim — config/theme loading for NimLaunch SDL2.
 
-import std/[os, strutils, math, options]
+import std/[os, strutils, math, options, tables]
 import parsetoml as toml
 import ./[state as st, gui, utils, paths]
 
@@ -55,7 +55,12 @@ proc applyThemeAndColors*(cfg: var Config; name: string; doNotify = true) =
 
 proc saveLastTheme*(cfgPath: string) =
   ## Update or insert [theme].last_chosen = "<name>" in the TOML file.
-  var lines = readFile(cfgPath).splitLines()
+  var lines: seq[string]
+  try:
+    lines = readFile(cfgPath).splitLines()
+  except CatchableError as e:
+    echo "saveLastTheme warning: unable to read ", cfgPath, " (", e.name, "): ", e.msg
+    return
   var inTheme = false
   var updated = false
   var themeSectionFound = false
@@ -85,7 +90,10 @@ proc saveLastTheme*(cfgPath: string) =
     lines.add("last_chosen = \"" & st.config.themeName & "\"")
     updated = true
   if updated:
-    writeFile(cfgPath, lines.join("\n"))
+    try:
+      writeFile(cfgPath, lines.join("\n"))
+    except CatchableError as e:
+      echo "saveLastTheme warning: unable to write ", cfgPath, " (", e.name, "): ", e.msg
 
 proc loadShortcutsSection(tbl: toml.TomlValueRef; cfgPath: string) =
   ## Populate `state.shortcuts` from `[[shortcuts]]` entries in *tbl*.
@@ -96,65 +104,88 @@ proc loadShortcutsSection(tbl: toml.TomlValueRef; cfgPath: string) =
     for scVal in tbl["shortcuts"].getElems():
       let scTbl = scVal.getTable()
       let prefixRaw = scTbl.getOrDefault("prefix").getStr("")
-      let prefix = normalizePrefix(prefixRaw)
+      var prefix = normalizePrefix(prefixRaw)
       let base = scTbl.getOrDefault("base").getStr("").strip()
-      if prefix.len == 0 or base.len == 0:
-        continue
-
       let label = scTbl.getOrDefault("label").getStr("").strip(chars = {'\t', '\r', '\n'})
       let modeStr = scTbl.getOrDefault("mode").getStr("url").toLowerAscii
+      let group = scTbl.getOrDefault("group").getStr("").strip().toLowerAscii
+      let runModeStr = scTbl.getOrDefault("run_mode").getStr("").strip().toLowerAscii
+      let stayOpen = scTbl.getOrDefault("stay_open").getBool(false)
+
+      if base.len == 0:
+        continue
+      if group.len > 0:
+        prefix.setLen(0) # groups use their own prefix; ignore per-entry prefixes
+      if prefix.len == 0 and group.len == 0:
+        continue
 
       var mode = smUrl
       case modeStr
       of "shell": mode = smShell
       of "file": mode = smFile
       else: discard
+      if group == "power" and mode != smShell:
+        mode = smShell
 
-      st.shortcuts.add Shortcut(prefix: prefix, label: label, base: base, mode: mode)
+      var runMode = pamTerminal
+      case runModeStr
+      of "spawn": runMode = pamSpawn
+      of "terminal": runMode = pamTerminal
+      else: discard
+
+      st.shortcuts.add Shortcut(prefix: prefix,
+                                label: label,
+                                base: base,
+                                mode: mode,
+                                group: group,
+                                runMode: runMode,
+                                stayOpen: stayOpen)
   except CatchableError:
     echo "NimLaunch warning: ignoring invalid [[shortcuts]] entries in ", cfgPath
 
-proc loadPowerSection(tbl: toml.TomlValueRef; cfgPath: string) =
-  ## Populate power prefix and `state.powerActions` from *tbl*.
-  st.powerActions = @[]
+proc parseGroupQueryMode(modeStr: string): GroupQueryMode =
+  case modeStr
+  of "pass", "passthrough", "pass-through": gqmPass
+  else: gqmFilter
 
-  if tbl.hasKey("power"):
-    try:
-      let p = tbl["power"].getTable()
-      let rawPrefix = p.getOrDefault("prefix").getStr(st.config.powerPrefix)
-      st.config.powerPrefix = normalizePrefix(rawPrefix)
-    except CatchableError:
-      echo "NimLaunch warning: ignoring invalid [power] section in ", cfgPath
-
-  if not tbl.hasKey("power_actions"): return
+proc loadGroupsSection(tbl: toml.TomlValueRef; cfgPath: string) =
+  ## Populate `state.groupQueryModes` from `[[groups]]` entries in *tbl*.
+  st.groupQueryModes = initTable[string, GroupQueryMode]()
+  if not tbl.hasKey("groups"): return
 
   try:
-    for paVal in tbl["power_actions"].getElems():
-      let paTbl = paVal.getTable()
-      let label = paTbl.getOrDefault("label").getStr("").strip()
-      let command = paTbl.getOrDefault("command").getStr("").strip()
-      if label.len == 0 or command.len == 0:
+    for grpVal in tbl["groups"].getElems():
+      let grpTbl = grpVal.getTable()
+      let name = grpTbl.getOrDefault("name").getStr("").strip().toLowerAscii
+      if name.len == 0:
         continue
-
-      var mode = pamSpawn
-      let modeStr = paTbl.getOrDefault("mode").getStr("spawn").strip().toLowerAscii
-      case modeStr
-      of "terminal": mode = pamTerminal
-      of "spawn", "shell": discard
-      else: discard
-
-      let stayOpen = paTbl.getOrDefault("stay_open").getBool(false)
-
-      st.powerActions.add PowerAction(label: label,
-                                      command: command,
-                                      mode: mode,
-                                      stayOpen: stayOpen)
+      let modeStr = grpTbl.getOrDefault("query_mode").getStr("filter").strip().toLowerAscii
+      st.groupQueryModes[name] = parseGroupQueryMode(modeStr)
   except CatchableError:
-    echo "NimLaunch warning: ignoring invalid [[power_actions]] entries in ", cfgPath
+    echo "NimLaunch warning: ignoring invalid [[groups]] entries in ", cfgPath
+
+proc ensureGroupDefaults() =
+  ## Ensure every shortcut group exists with a default query mode.
+  for sc in st.shortcuts:
+    if sc.group.len == 0: continue
+    if not st.groupQueryModes.hasKey(sc.group):
+      st.groupQueryModes[sc.group] = gqmFilter
+
+proc loadPowerSection(tbl: toml.TomlValueRef; cfgPath: string) =
+  ## Populate the power prefix from [power].
+  if not tbl.hasKey("power"):
+    return
+  try:
+    let p = tbl["power"].getTable()
+    let rawPrefix = p.getOrDefault("prefix").getStr(st.config.powerPrefix)
+    st.config.powerPrefix = normalizePrefix(rawPrefix)
+  except CatchableError:
+    echo "NimLaunch warning: ignoring invalid [power] section in ", cfgPath
 
 proc initLauncherConfig*() =
   ## Initialize defaults, read TOML, apply last theme, compute geometry.
   st.config = Config() # zero-init
+  st.groupQueryModes = initTable[string, GroupQueryMode]()
 
   ## In-code defaults
   st.config.winWidth = 500
@@ -162,9 +193,9 @@ proc initLauncherConfig*() =
   st.config.maxVisibleItems = 10
   st.config.centerWindow = true
   st.config.positionX = 20
-  st.config.positionY = 50
+  st.config.positionY = 500
   st.config.verticalAlign = "one-third"
-  st.config.fontName = "DejaVu Sans:size=12"
+  st.config.fontName = "Dejavu:size=16"
   st.config.prompt = "> "
   st.config.cursor = "_"
   st.config.opacity = 1.0
@@ -184,7 +215,12 @@ proc initLauncherConfig*() =
     echo "Created default config at ", cfgPath
 
   ## Parse TOML
-  let tbl = toml.parseFile(cfgPath)
+  var tbl: toml.TomlValueRef
+  try:
+    tbl = toml.parseFile(cfgPath)
+  except CatchableError as e:
+    echo "NimLaunch warning: invalid TOML in ", cfgPath, " (", e.name, "): ", e.msg
+    tbl = toml.parseString(defaultToml)
 
   ## window
   if tbl.hasKey("window"):
@@ -260,7 +296,9 @@ proc initLauncherConfig*() =
     except CatchableError:
       echo "NimLaunch warning: ignoring invalid [[themes]] entries in ", cfgPath
 
+  loadGroupsSection(tbl, cfgPath)
   loadShortcutsSection(tbl, cfgPath)
+  ensureGroupDefaults()
   loadPowerSection(tbl, cfgPath)
 
   ## last_chosen (case-insensitive match; fallback to first theme)
@@ -292,6 +330,8 @@ proc initLauncherConfig*() =
   ## guard rails for config values that affect layout/search limits
   if st.config.maxVisibleItems < 1:
     st.config.maxVisibleItems = 1
+  if st.config.borderWidth < 0:
+    st.config.borderWidth = 0
   st.config.opacity = clamp(st.config.opacity, 0.1, 1.0)
 
   ## derived geometry

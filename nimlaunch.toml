@@ -19,12 +19,12 @@ vertical_align = "one-third"      # Only used when center=true; "top", "center",
 fontname = "Dejavu:size=16"    # Font name & size (Xft format: "Font Family:size=N")
 
 [input]
-prompt = "> "                     # Prompt prefix shown before your query
-cursor = "_"                      # Cursor character displayed after query text
+prompt = " "                     # Prompt prefix shown before your query
+cursor = " "                     # Cursor character displayed after query text
 vim_mode = false                  # true enables Vim-style modes/hjkl navigation
 
 [terminal]
-program = "kitty  -e"        # Terminal emulator for slash commands (/ ...)
+program = "kitty  -e"             # Terminal emulator for slash commands (/ ...)
                                   # If not found, NimLaunch will fall back to a default
 
 [border]
@@ -32,6 +32,16 @@ width = 2                         # Border thickness in pixels (0 = no border)
 
 [icons]
 enabled = true                    # Set to false to hide icons in the list
+
+# ==========================
+# Groups
+# ==========================
+# Define group names used by [[shortcuts]].
+# query_mode = "filter" (default) or "pass".
+
+[[groups]]
+name = "power"
+query_mode = "filter"
 
 # ==========================
 # Shortcuts
@@ -69,26 +79,34 @@ mode   = "url"
 # Power actions
 # ==========================
 # Configure system commands exposed under the `p` prefix (type `:p` in the UI).
-# `mode` accepts "spawn" (background) or "terminal" (runs inside
-# your configured terminal). `stay_open = true` keeps the launcher visible.
+# Power entries now live in [[shortcuts]] with group = "power".
 
 [power]
 prefix = ":p"           # Any prefix you write (with/without ':') maps to one trigger
 
-[[power_actions]]
-label   = "Shutdown"
-command = "systemctl poweroff"
-mode    = "spawn"
+[[shortcuts]]
+group     = "power"
+label     = "Shutdown"
+base      = "systemctl poweroff"
+mode      = "shell"
+run_mode  = "spawn"
+stay_open = false
 
-[[power_actions]]
-label   = "Reboot"
-command = "systemctl reboot"
-mode    = "spawn"
+[[shortcuts]]
+group     = "power"
+label     = "Reboot"
+base      = "systemctl reboot"
+mode      = "shell"
+run_mode  = "spawn"
+stay_open = false
 
-[[power_actions]]
-label       = "Logout"
-command     = "loginctl terminate-user $USER"
-mode        = "spawn"
+[[shortcuts]]
+group     = "power"
+label     = "Logout"
+base      = "loginctl terminate-user $USER"
+mode      = "shell"
+run_mode  = "spawn"
+stay_open = false
 
 # ==========================
 # Themes

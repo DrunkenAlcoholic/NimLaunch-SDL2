@@ -1,10 +1,10 @@
 ## app_core.nim — port of NimLaunch logic (search, actions) for SDL2 UI.
 
-import std/[os, osproc, strutils, options, tables, sequtils, json, uri, sets,
-            algorithm, times, heapqueue, streams, exitprocs]
+import std/[os, strutils, tables, sets, uri,
+            algorithm, heapqueue, exitprocs]
 when defined(posix):
   import posix
-import ./[state, parser, gui, utils, settings, paths]
+import ./[state, parser, gui, utils, settings, paths, fuzzy, proc_utils, search, theme_session, config_actions]
 
 when defined(posix):
   when not declared(flock):
@@ -13,18 +13,8 @@ when defined(posix):
 # ── Module-local globals ────────────────────────────────────────────────
 var
   actions*: seq[Action]        ## transient list for the UI
-  lastInputChangeMs* = 0'i64   ## updated on each keystroke
-  lastSearchBuildMs* = 0'i64   ## idle-loop guard to rebuild after debounce
-  lastSearchQuery* = ""        ## cache key for s: queries
-  lastSearchResults*: seq[string] = @[] ## cached paths for narrowing queries
-  configFilesLoaded = false
-  configFilesCache: seq[DesktopApp] = @[]
 
 const
-  SearchDebounceMs* = 240   # debounce for s: while typing (unified)
-  SearchFdCap      = 800    # cap external search results from fd/locate
-  SearchShowCap    = 250    # cap items we score per rebuild
-  CacheFormatVersion = 4
   iconAliases = {
     "code": "visual-studio-code",
     "codium": "vscodium",
@@ -141,246 +131,16 @@ else:
       discard
     true
 
-# ── Shell / process helpers ─────────────────────────────────────────────
-proc hasHoldFlagLocal(args: seq[string]): bool =
-  ## Detect common "keep window open" flags passed to terminals.
-  for a in args:
-    case a
-    of "--hold", "-hold", "--keep-open", "--wait", "--noclose",
-       "--stay-open", "--keep", "--keepalive":
-      return true
-    else:
-      discard
-  false
-
-proc appendShellArgs(argv: var seq[string]; shExe: string; shArgs: seq[string]) =
-  ## Append shell executable and its arguments to `argv`.
-  argv.add shExe
-  for a in shArgs: argv.add a
-
-proc buildTerminalArgs(base: string; termArgs: seq[string]; shExe: string;
-                       shArgs: seq[string]): seq[string] =
-  ## Normalize command-line to launch a shell inside major terminals.
-  var argv = termArgs
-  case base
-  of "gnome-terminal", "kgx":
-    argv.add "--"
-  of "wezterm":
-    argv = @["start"] & argv
-  else:
-    argv.add "-e"
-  appendShellArgs(argv, shExe, shArgs)
-  argv
-
-proc buildShellCommand(cmd, shExe: string; hold = false):
-    tuple[fullCmd: string, shArgs: seq[string]] =
-  ## Run user's command in a group, and add a robust hold prompt when needed.
-  ## Grouping prevents suffix binding to pipelines/conditionals.
-  let suffix = (if hold: "" else: "; printf '\\n[Press Enter to close]\\n'; read -r _")
-  let fullCmd = "{ " & cmd & " ; }" & suffix
-  let shArgs = if shExe.endsWith("bash"): @["-lc", fullCmd] else: @["-c", fullCmd]
-  (fullCmd, shArgs)
-
-proc runCommand(cmd: string) =
-  ## Run `cmd` in the user's terminal; fall back to /bin/sh if none.
-  let bash = findExe("bash")
-  let shExe = if bash.len > 0: bash else: "/bin/sh"
-
-  var parts = tokenize(chooseTerminal()) # parser.tokenize on config.terminalExe/$TERMINAL
-  if parts.len == 0:
-    let (_, shArgs) = buildShellCommand(cmd, shExe)
-    discard startProcess(shExe, args = shArgs,
-                         options = {poDaemon, poParentStreams})
-    return
-
-  let exe = parts[0]
-  let exePath = findExe(exe)
-  if exePath.len == 0:
-    let (_, shArgs) = buildShellCommand(cmd, shExe)
-    discard startProcess(shExe, args = shArgs,
-                         options = {poDaemon, poParentStreams})
-    return
-
-  var termArgs = if parts.len > 1: parts[1..^1] else: @[]
-  let base = exe.extractFilename()
-  let hold = hasHoldFlagLocal(termArgs)
-  let (_, shArgs) = buildShellCommand(cmd, shExe, hold)
-  let argv = buildTerminalArgs(base, termArgs, shExe, shArgs)
-  discard startProcess(exePath, args = argv,
-                       options = {poDaemon, poParentStreams})
-
-proc spawnShellCommand(cmd: string): bool =
-  ## Execute *cmd* via /bin/sh in the background; return success.
-  try:
-    discard startProcess("/bin/sh", args = ["-c", cmd],
-                         options = {poDaemon, poParentStreams})
-    true
-  except CatchableError as e:
-    echo "spawnShellCommand failed: ", cmd, " (", e.name, "): ", e.msg
-    false
-
-proc openUrl(url: string) =
-  ## Open *url* via xdg-open (no shell involved). Log failures for diagnosis.
-  try:
-    discard startProcess("/usr/bin/env", args = @["xdg-open", url],
-                         options = {poDaemon, poParentStreams})
-  except CatchableError as e:
-    echo "openUrl failed: ", url, " (", e.name, "): ", e.msg
-
-# ── Small searches: ~/.config helper ────────────────────────────────────
-proc shortenPath(p: string; maxLen = 80): string =
-  ## Replace $HOME with ~, and ellipsize the middle if too long.
-  var s = p
-  let home = getHomeDir()
-  if s.startsWith(home & "/"): s = "~" & s[home.len .. ^1]
-  if s.len <= maxLen: return s
-  let keep = maxLen div 2 - 2
-  if keep <= 0: return s
-  result = s[0 ..< keep] & "…" & s[s.len - keep .. ^1]
-
-proc scanFilesFast*(query: string): seq[string] =
-  ## Fast file search in order:
-  ##  1) `fd` (fast, respects .gitignore)
-  ##  2) `locate -i` (DB backed, may be stale)
-  ##  3) bounded walk under $HOME (slowest)
-  let home  = getHomeDir()
-  let ql    = query.toLowerAscii
-  let limit = SearchFdCap
-
-  try:
-    ## --- Prefer `fd` ----------------------------------------------------
-    let fdExe = findExe("fd")
-    if fdExe.len > 0:
-      let args = @[
-        "-i", "--type", "f", "--absolute-path",
-        "--color", "never",
-        "--max-results", $limit,
-        "--fixed-strings",
-        query, home
-      ]
-      let p = startProcess(fdExe, args = args, options = {poUsePath, poStdErrToStdOut})
-      defer: close(p)
-      let output = p.outputStream.readAll()
-      for line in output.splitLines():
-        if line.len > 0: result.add(line)
-      return
-
-    ## --- Fallback: `locate -i` -----------------------------------------
-    let locExe = findExe("locate")
-    if locExe.len > 0:
-      let p = startProcess(locExe, args = @["-i", "-l", $limit, query],
-                           options = {poUsePath, poStdErrToStdOut})
-      defer: close(p)
-      let output = p.outputStream.readAll()
-      for line in output.splitLines():
-        if line.len > 0: result.add(line)
-      return
-
-    ## --- Final fallback: bounded walk under $HOME -----------------------
-    var count = 0
-    for path in walkDirRec(home, yieldFilter = {pcFile}):
-      if path.toLowerAscii.contains(ql):
-        result.add(path)
-        inc count
-        if count >= limit: break
-
-  except CatchableError as e:
-    echo "scanFilesFast warning: ", e.name, ": ", e.msg
-
-proc refreshConfigFiles() =
-  ## Build the cached ~/.config file list once per run.
-  configFilesCache.setLen(0)
-  let base = userConfigHome()
-  try:
-    for path in walkDirRec(base, yieldFilter = {pcFile}):
-      let fn = path.extractFilename
-      if fn.len == 0: continue
-      configFilesCache.add DesktopApp(
-        name: fn,
-        exec: "xdg-open " & shellQuote(path),
-        hasIcon: false
-      )
-  except OSError:
-    discard
-  configFilesLoaded = true
-
-proc ensureConfigFiles() =
-  if not configFilesLoaded:
-    refreshConfigFiles()
-
-# ── Applications discovery (.desktop) ───────────────────────────────────
-proc newestDesktopMtime(dir: string): int64 =
-  ## Return newest mtime among *.desktop files under *dir* (recursive).
-  if not dirExists(dir): return 0
-  var newest = 0'i64
-  for entry in walkDirRec(dir, yieldFilter = {pcFile}):
-    if entry.endsWith(".desktop"):
-      let m = times.toUnix(getLastModificationTime(entry))
-      if m > newest: newest = m
-  newest
-
-proc loadApplications*() =
-  ## Scan .desktop files with caching to ~/.cache/nimlaunch/apps.json.
-  let appDirs = applicationDirs()
-  let dirMtimes = appDirs.map(newestDesktopMtime)
-
-  let cacheBase = cacheDir()
-  let cacheFile = cacheBase / "apps.json"
-
-  if fileExists(cacheFile):
-    try:
-      let node = parseJson(readFile(cacheFile))
-      if node.kind == JObject and node.hasKey("formatVersion"):
-        let c = to(node, CacheData)
-        if c.formatVersion == CacheFormatVersion and
-           c.appDirs == appDirs and c.dirMtimes == dirMtimes:
-          timeIt "Cache hit:":
-            allApps = c.apps
-            filteredApps = @[]
-            matchSpans = @[]
-          return
-      else:
-        echo "Cache invalid — rescanning …"
-    except:
-      echo "Cache miss — rescanning …"
-
-  timeIt "Full scan:":
-    var dedup = initTable[string, DesktopApp]()
-    for dir in appDirs:
-      if not dirExists(dir): continue
-      for path in walkDirRec(dir, yieldFilter = {pcFile}):
-        if not path.endsWith(".desktop"): continue
-        let opt = parseDesktopFile(path)
-        if isSome(opt):
-          let app = get(opt)
-          let sanitizedExec = parser.stripFieldCodes(app.exec).strip()
-          var key = sanitizedExec.toLowerAscii
-          if key.len == 0:
-            key = getBaseExec(app.exec).toLowerAscii
-          if key.len == 0:
-            key = app.name.toLowerAscii
-          if not dedup.hasKey(key) or (app.hasIcon and not dedup[key].hasIcon):
-            dedup[key] = app
-
-    allApps = dedup.values.toSeq
-    allApps.sort(proc(a, b: DesktopApp): int = cmpIgnoreCase(a.name, b.name))
-    filteredApps = @[]
-    matchSpans = @[]
-    try:
-      createDir(cacheBase)
-      writeFile(cacheFile, pretty(%CacheData(formatVersion: CacheFormatVersion,
-                                             appDirs: appDirs,
-                                             dirMtimes: dirMtimes,
-                                             apps: allApps)))
-    except CatchableError:
-      echo "Warning: cache not saved."
-
-# ── Fuzzy match + helpers ───────────────────────────────────────────────
-proc recentBoost(name: string): int =
-  ## Small score bonus for recently used apps (first is strongest).
-  let idx = recentApps.find(name)
-  if idx >= 0: return max(0, 200 - idx * 40)
-  0
+# ── Command parsing / actions helpers ───────────────────────────────────
+type CmdKind* = enum
+  ## Recognised input prefixes.
+  ckNone,        # no special prefix
+  ckTheme,       # `t:`
+  ckConfig,      # `c:`
+  ckSearch,      # `s:` fast file search
+  ckGroup,       # user-defined group prefix
+  ckShortcut,    # custom shortcuts (e.g. :g, :wiki)
+  ckRun          # raw `r:` command
 
 proc takePrefix(input, pfx: string; rest: var string): bool =
   ## Consume a command prefix and return the remainder (trimmed).
@@ -394,118 +154,8 @@ proc takePrefix(input, pfx: string; rest: var string): bool =
       rest = input[n .. ^1].strip(); return true
   false
 
-proc subseqPositions(q, t: string): seq[int] =
-  ## Case-insensitive subsequence positions of q within t (for highlight).
-  if q.len == 0: return @[]
-  let lq = q.toLowerAscii
-  let lt = t.toLowerAscii
-  var qi = 0
-  for i in 0 ..< lt.len:
-    if qi < lq.len and lt[i] == lq[qi]:
-      result.add i
-      inc qi
-      if qi == lq.len: return
-  result.setLen(0)
-
-proc subseqSpans(q, t: string): seq[(int, int)] =
-  ## Convert positions to 1-char spans for highlighting.
-  for p in subseqPositions(q, t): result.add (p, 1)
-
-proc isWordBoundary(lt: string; idx: int): bool =
-  ## Basic token boundary check for nicer scoring.
-  if idx <= 0: return true
-  let c = lt[idx-1]
-  c == ' ' or c == '-' or c == '_' or c == '.' or c == '/'
-
-proc scoreMatch(q, t, fullPath, home: string): int =
-  ## Heuristic score for matching q against t (higher is better).
-  ## Typo-friendly: 1 edit (ins/del/sub) or one adjacent transposition.
-  if q.len == 0: return -1_000_000
-  let lq = q.toLowerAscii
-  let lt = t.toLowerAscii
-  let pos = lt.find(lq)
-
-  ## fast helpers (no alloc)
-  proc withinOneEdit(a, b: string): bool =
-    let m = a.len; let n = b.len
-    if abs(m - n) > 1: return false
-    var i = 0; var j = 0; var edits = 0
-    while i < m and j < n:
-      if a[i] == b[j]: inc i; inc j
-      else:
-        inc edits; if edits > 1: return false
-        if m == n: inc i; inc j
-        elif m < n: inc j
-        else: inc i
-    edits += (m - i) + (n - j)
-    edits <= 1
-
-  proc withinOneTransposition(a, b: string): bool =
-    if a.len != b.len or a.len < 2: return false
-    var k = 0
-    while k < a.len and a[k] == b[k]: inc k
-    if k >= a.len - 1: return false
-    if not (a[k] == b[k+1] and a[k+1] == b[k]): return false
-    let tailStart = k + 2
-    result = if tailStart < a.len:
-      a[tailStart .. ^1] == b[tailStart .. ^1]
-    else:
-      true
-
-  var s = -1_000_000
-  if pos >= 0:
-    s = 1000
-    if pos == 0: s += 200
-    if isWordBoundary(lt, pos): s += 80
-    s += max(0, 60 - (t.len - q.len))
-
-  if t == q: s += 9000
-  elif lt == lq: s += 8600
-  elif lt.startsWith(lq): s += 8200
-  elif pos >= 0: s += 7800
-  else:
-    var typoHit = false
-
-    ## Whole-string typo tolerance (1 edit or adjacent swap).
-    if lq.len > 0 and (withinOneEdit(lq, lt) or withinOneTransposition(lq, lt)):
-      typoHit = true
-      s = max(s, 7600)
-
-    ## Substring typo tolerance to catch near-start matches.
-    if not typoHit and lq.len > 0:
-      let sizes = [max(1, lq.len - 1), lq.len, lq.len + 1]
-      for L in sizes:
-        if L > lt.len: continue
-        var start = 0
-        let maxStart = lt.len - L
-        while start <= maxStart:
-          let seg = lt[start ..< start + L]
-          if withinOneEdit(lq, seg) or withinOneTransposition(lq, seg):
-            typoHit = true
-            var base = 7700
-            if start == 0: base = 7950
-            s = max(s, base - min(120, start))
-            break
-          inc start
-        if typoHit: break
-
-  if fullPath.startsWith(home & "/"):
-    if lt == lq: s += 600
-    elif lt.startsWith(lq): s += 400
-  s
-
-type CmdKind* = enum
-  ## Recognised input prefixes.
-  ckNone,        # no special prefix
-  ckTheme,       # `t:`
-  ckConfig,      # `c:`
-  ckSearch,      # `s:` fast file search
-  ckPower,       # `p:` system/power actions
-  ckShortcut,    # custom shortcuts (e.g. :g, :wiki)
-  ckRun          # raw `r:` command
-
-proc parseCommand*(inputText: string): (CmdKind, string, int) =
-  ## Parse *inputText* and return the command kind, remainder, and shortcut index.
+proc parseCommand*(inputText: string): (CmdKind, string, int, string) =
+  ## Parse *inputText* and return the command kind, remainder, shortcut index, and group name.
   if inputText.len > 0 and inputText[0] == ':':
     var body = inputText[1 .. ^1]
     var rest = ""
@@ -518,62 +168,28 @@ proc parseCommand*(inputText: string): (CmdKind, string, int) =
       rest = ""
     let norm = normalizePrefix(keyword)
     case norm
-    of "s": return (ckSearch, rest, -1)
-    of "c": return (ckConfig, rest, -1)
-    of "t": return (ckTheme, rest, -1)
-    of "r": return (ckRun, rest, -1)
+    of "s": return (ckSearch, rest, -1, "")
+    of "c": return (ckConfig, rest, -1, "")
+    of "t": return (ckTheme, rest, -1, "")
+    of "r": return (ckRun, rest, -1, "")
     else:
       if config.powerPrefix.len > 0 and norm == config.powerPrefix:
-        return (ckPower, rest, -1)
+        return (ckGroup, rest, -1, "power")
       for i, sc in shortcuts:
+        if sc.prefix.len == 0:
+          continue
         if norm == sc.prefix:
-          return (ckShortcut, rest, i)
-      return (ckNone, inputText, -1)
+          return (ckShortcut, rest, i, "")
+      if groupQueryModes.hasKey(norm):
+        return (ckGroup, rest, -1, norm)
+      return (ckNone, inputText, -1, "")
 
   var rest: string
   if takePrefix(inputText, "!", rest):
-    return (ckRun, rest.strip(), -1)
-  (ckNone, inputText, -1)
+    return (ckRun, rest.strip(), -1, "")
+  (ckNone, inputText, -1, "")
 
-proc beginThemePreviewSession() =
-  if not themePreviewActive:
-    themePreviewActive = true
-    themePreviewBaseTheme = config.themeName
-    themePreviewCurrent = config.themeName
-
-proc endThemePreviewSession*(persist: bool) =
-  if not themePreviewActive:
-    return
-  if persist:
-    themePreviewBaseTheme = config.themeName
-    themePreviewCurrent = config.themeName
-  else:
-    if themePreviewBaseTheme.len > 0 and themePreviewCurrent.len > 0 and
-       themePreviewCurrent != themePreviewBaseTheme:
-      applyThemeAndColors(config, themePreviewBaseTheme)
-      themePreviewCurrent = themePreviewBaseTheme
-  themePreviewActive = false
-
-proc updateThemePreview() =
-  let (cmd, _, _) = parseCommand(inputText)
-  if cmd != ckTheme:
-    return
-  if actions.len == 0:
-    endThemePreviewSession(false)
-    return
-  beginThemePreviewSession()
-  if selectedIndex < 0 or selectedIndex >= actions.len:
-    return
-  let act = actions[selectedIndex]
-  if act.kind != akTheme:
-    return
-  let name = act.exec
-  if themePreviewCurrent == name:
-    return
-  applyThemeAndColors(config, name)
-  themePreviewCurrent = name
-
-
+# ── Applications discovery (.desktop) ───────────────────────────────────
 proc substituteQuery(pattern, value: string): string =
   ## Replace `{query}` placeholder or append value if absent.
   if pattern.contains("{query}"):
@@ -623,7 +239,7 @@ proc buildThemeActions(rest: string; defaultIndex: var int): seq[Action] =
 
 proc buildConfigActions(rest: string): seq[Action] =
   ## Build configuration file results under ~/.config.
-  ensureConfigFiles()
+  ensureConfigFilesLoaded()
   let ql = rest.toLowerAscii
   for entry in configFilesCache:
     if ql.len == 0 or entry.name.toLowerAscii.contains(ql):
@@ -640,23 +256,51 @@ proc buildShortcutActions(rest: string; shortcutIdx: int): seq[Action] =
            label: shortcutLabel(sc, rest),
            exec: shortcutExec(sc, rest),
            iconName: "",
-           shortcutMode: sc.mode)]
+           shortcutMode: sc.mode,
+           powerMode: sc.runMode,
+           stayOpen: sc.stayOpen)]
 
-proc buildPowerActions(rest: string): seq[Action] =
-  ## Build power/system actions filtered by label.
-  if powerActions.len == 0:
+proc groupQueryMode(name: string): GroupQueryMode =
+  if groupQueryModes.hasKey(name): groupQueryModes[name] else: gqmFilter
+
+proc buildGroupActions(groupName, rest: string): seq[Action] =
+  ## Build grouped actions. Query mode controls pass-through vs filter.
+  var entries: seq[Shortcut] = @[]
+  for sc in shortcuts:
+    if sc.group == groupName:
+      entries.add sc
+  if entries.len == 0:
     return @[Action(kind: akPlaceholder,
-                    label: "No power actions configured",
+                    label: "No actions in group",
                     exec: "")]
-  let ql = rest.strip().toLowerAscii
-  for pa in powerActions:
-    if ql.len == 0 or pa.label.toLowerAscii.contains(ql):
-      result.add Action(kind: akPower,
-                        label: pa.label,
-                        exec: pa.command,
+
+  if groupQueryMode(groupName) == gqmPass:
+    for sc in entries:
+      let label = shortcutLabel(sc, rest)
+      let exec = shortcutExec(sc, rest)
+      let safeLabel = if label.len > 0: label else: sc.base
+      result.add Action(kind: akShortcut,
+                        label: safeLabel,
+                        exec: exec,
                         iconName: "",
-                        powerMode: pa.mode,
-                        stayOpen: pa.stayOpen)
+                        shortcutMode: sc.mode,
+                        powerMode: sc.runMode,
+                        stayOpen: sc.stayOpen)
+    if result.len == 0:
+      result.add Action(kind: akPlaceholder, label: "No matches", exec: "")
+    return
+
+  let ql = rest.strip().toLowerAscii
+  for sc in entries:
+    let label = if sc.label.len > 0: sc.label else: sc.base
+    if ql.len == 0 or label.toLowerAscii.contains(ql):
+      result.add Action(kind: akShortcut,
+                        label: label,
+                        exec: shortcutExec(sc, ""),
+                        iconName: "",
+                        shortcutMode: sc.mode,
+                        powerMode: sc.runMode,
+                        stayOpen: sc.stayOpen)
   if result.len == 0:
     result.add Action(kind: akPlaceholder, label: "No matches", exec: "")
 
@@ -678,8 +322,6 @@ proc buildSearchActions(rest: string): seq[Action] =
   var paths: seq[string]
   if lastSearchQuery.len > 0 and rest.len >= lastSearchQuery.len and
      rest.startsWith(lastSearchQuery) and lastSearchResults.len > 0:
-    ## Reuse cached results and rely on fuzzy scoring instead of substring filter,
-    ## so minor typos still surface.
     paths = lastSearchResults
   else:
     paths = scanFilesFast(rest)
@@ -696,6 +338,11 @@ proc buildSearchActions(rest: string): seq[Action] =
     d
 
   let home = getHomeDir()
+  let homeDepth = block:
+    var d = 0
+    for ch in home:
+      if ch == '/': inc d
+    d
   var top = initHeapQueue[(int, string)]()
   let limit = config.maxVisibleItems
   let ql = restLower
@@ -712,7 +359,7 @@ proc buildSearchActions(rest: string): seq[Action] =
     if p.startsWith(home & "/"):
       s += 800
       let dir = p[0 ..< max(0, p.len - name.len)]
-      let relDepth = max(0, pathDepth(dir) - pathDepth(home))
+      let relDepth = max(0, pathDepth(dir) - homeDepth)
       s -= min(relDepth, 10) * 200
       if dir == home or dir == (home & "/"):
         s += 5_000
@@ -826,7 +473,7 @@ proc updateDisplayRows(cmd: CmdKind; highlightQuery: string; defaultIndex: int) 
 
     if cmd == ckTheme:
       if actions.len > 0 and actions[selectedIndex].kind == akTheme:
-        updateThemePreview()
+        updateThemePreview(cmd == ckTheme, actions, selectedIndex)
       else:
         endThemePreviewSession(false)
     else:
@@ -835,7 +482,7 @@ proc updateDisplayRows(cmd: CmdKind; highlightQuery: string; defaultIndex: int) 
 # ── Build actions & mirror to filteredApps ─────────────────────────────
 proc buildActions*() =
   ## Populate `actions` based on `inputText`; mirror to GUI lists/spans.
-  let (cmd, rest, shortcutIdx) = parseCommand(inputText)
+  let (cmd, rest, shortcutIdx, groupName) = parseCommand(inputText)
   var defaultIndex = 0
   var nextActions: seq[Action] = @[]
 
@@ -847,8 +494,8 @@ proc buildActions*() =
     nextActions = buildConfigActions(rest)
   of ckShortcut:
     nextActions = buildShortcutActions(rest, shortcutIdx)
-  of ckPower:
-    nextActions = buildPowerActions(rest)
+  of ckGroup:
+    nextActions = buildGroupActions(groupName, rest)
   of ckSearch:
     nextActions = buildSearchActions(rest)
   of ckRun:
@@ -880,7 +527,9 @@ proc performAction*(a: Action) =
       gui.notifyStatus("Failed: " & a.label, 1600)
       exitAfter = false
   of akFile:
-    discard openPathWithFallback(a.exec)
+    if not openPathWithFallback(a.exec):
+      gui.notifyStatus("Failed to open: " & a.label, 1600)
+      exitAfter = false
   of akApp:
     ## safer: strip .desktop field codes before launching
     let sanitized = parser.stripFieldCodes(a.exec).strip()
@@ -898,7 +547,15 @@ proc performAction*(a: Action) =
     of smUrl:
       openUrl(a.exec)
     of smShell:
-      runCommand(a.exec)
+      var success = true
+      case a.powerMode
+      of pamSpawn:
+        success = spawnShellCommand(a.exec)
+      of pamTerminal:
+        runCommand(a.exec)
+      if not success:
+        gui.notifyStatus("Failed: " & a.label, 1600)
+        exitAfter = false
     of smFile:
       let expanded = a.exec.expandTilde()
       if not fileExists(expanded) and not dirExists(expanded):
@@ -907,6 +564,8 @@ proc performAction*(a: Action) =
       elif not openPathWithFallback(expanded):
         gui.notifyStatus("Failed to open: " & shortenPath(expanded, 50), 1600)
         exitAfter = false
+    if exitAfter and a.stayOpen:
+      exitAfter = false
   of akPower:
     var success = true
     case a.powerMode
@@ -954,104 +613,17 @@ proc moveSelectionBy*(step: int) =
   elif selectedIndex >= viewOffset + config.maxVisibleItems:
     viewOffset = selectedIndex - config.maxVisibleItems + 1
     if viewOffset < 0: viewOffset = 0
-  updateThemePreview()
+  updateThemePreview(parseCommand(inputText)[0] == ckTheme, actions, selectedIndex)
 
 proc jumpToTop*() =
   if filteredApps.len == 0: return
   selectedIndex = 0
   viewOffset = 0
-  updateThemePreview()
+  updateThemePreview(parseCommand(inputText)[0] == ckTheme, actions, selectedIndex)
 
 proc jumpToBottom*() =
   if filteredApps.len == 0: return
   selectedIndex = filteredApps.len - 1
   let start = filteredApps.len - config.maxVisibleItems
   viewOffset = if start > 0: start else: 0
-  updateThemePreview()
-
-proc resetVimState*() =
-  vim = VimCommandState()
-
-proc syncVimCommand*() =
-  inputText = vim.prefix & vim.buffer
-  lastInputChangeMs = gui.nowMs()
-  buildActions()
-
-proc openVimCommand*(initial: string = "") =
-  if not vim.active:
-    vim.savedInput = inputText
-    vim.savedSelectedIndex = selectedIndex
-    vim.savedViewOffset = viewOffset
-    vim.restorePending = true
-  if initial.len > 0 and (initial[0] == ':' or initial[0] == '!'):
-    vim.prefix = initial[0 .. 0]
-    if initial.len > 1:
-      vim.buffer = initial[1 .. ^1]
-    else:
-      vim.buffer.setLen(0)
-  else:
-    vim.prefix = ""
-    if initial.len == 0 and vim.lastSearch.len > 0:
-      vim.buffer = vim.lastSearch
-    else:
-      vim.buffer = initial
-  vim.active = true
-  vim.pendingG = false
-  syncVimCommand()
-
-proc closeVimCommand*(restoreInput = false; preserveBuffer = false) =
-  let savedInput = vim.savedInput
-  let savedSelected = vim.savedSelectedIndex
-  let savedOffset = vim.savedViewOffset
-  let savedBuffer = vim.prefix & vim.buffer
-  if savedBuffer.len == 0:
-    vim.lastSearch = ""
-  elif preserveBuffer and (savedBuffer[0] != ':' and savedBuffer[0] != '!'):
-    vim.lastSearch = savedBuffer
-  vim.buffer.setLen(0)
-  vim.prefix = ""
-  vim.active = false
-  vim.pendingG = false
-
-  if restoreInput and vim.restorePending:
-    inputText = savedInput
-    lastInputChangeMs = gui.nowMs()
-    buildActions()
-
-    if filteredApps.len > 0:
-      let clampedSel = max(0, min(savedSelected, filteredApps.len - 1))
-      let visibleRows = max(1, config.maxVisibleItems)
-      let maxOffset = max(0, filteredApps.len - visibleRows)
-      var newOffset = max(0, min(savedOffset, maxOffset))
-      if clampedSel < newOffset:
-        newOffset = clampedSel
-      elif clampedSel >= newOffset + visibleRows:
-        newOffset = max(0, clampedSel - visibleRows + 1)
-      selectedIndex = clampedSel
-      viewOffset = newOffset
-    else:
-      selectedIndex = 0
-      viewOffset = 0
-
-  vim.savedInput = ""
-  vim.savedSelectedIndex = 0
-  vim.savedViewOffset = 0
-  vim.restorePending = false
-
-
-
-proc executeVimCommand*() =
-  let trimmed = (vim.prefix & vim.buffer).strip()
-  closeVimCommand(preserveBuffer = false)
-  if trimmed.len == 0:
-    return
-  if trimmed == ":q":
-    shouldExit = true
-    return
-  inputText = trimmed
-  lastInputChangeMs = gui.nowMs()
-  buildActions()
-  if trimmed.len == 0 or (trimmed[0] != ':' and trimmed[0] != '!'):
-    vim.lastSearch = trimmed
-  if actions.len > 0:
-    activateCurrentSelection()
+  updateThemePreview(parseCommand(inputText)[0] == ckTheme, actions, selectedIndex)
