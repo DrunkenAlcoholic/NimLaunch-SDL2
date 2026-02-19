@@ -34,6 +34,7 @@ type
     fontBold: FontPtr
     fontOverlay: FontPtr
     iconCache: Table[string, IconTexture]
+    iconPathCache: Table[string, string]
     windowShown: bool
     windowRaised: bool
 
@@ -117,6 +118,50 @@ proc resolveFontPath(name: string): string =
     discard
   DefaultFontPath
 
+proc computeAlignedWindowX(winWidth: int; displayIndex: int): cint =
+  ## Compute window X for centerWindow using display bounds.
+  var bounds: Rect
+  if getDisplayBounds(displayIndex.cint, bounds) != SdlSuccess:
+    return SDL_WINDOWPOS_CENTERED
+
+  let displayLeft = bounds.x.int
+  let displayW = bounds.w.int
+  if displayW <= 0:
+    return SDL_WINDOWPOS_CENTERED
+
+  var x = displayLeft + (displayW - winWidth) div 2
+  let maxX = displayLeft + displayW - winWidth
+  if maxX >= displayLeft:
+    x = max(displayLeft, min(x, maxX))
+  x.cint
+
+proc computeAlignedWindowY(winHeight: int; displayIndex: int): cint =
+  ## Compute window Y for centerWindow + verticalAlign using display bounds.
+  var bounds: Rect
+  if getDisplayBounds(displayIndex.cint, bounds) != SdlSuccess:
+    return SDL_WINDOWPOS_CENTERED
+
+  let displayTop = bounds.y.int
+  let displayH = bounds.h.int
+  if displayH <= 0:
+    return SDL_WINDOWPOS_CENTERED
+
+  let align = config.verticalAlign.toLowerAscii
+  var centerY: int
+  case align
+  of "top":
+    centerY = displayTop + winHeight div 2
+  of "center":
+    centerY = displayTop + displayH div 2
+  else:
+    centerY = displayTop + displayH div 3
+
+  var y = centerY - winHeight div 2
+  let maxY = displayTop + displayH - winHeight
+  if maxY >= displayTop:
+    y = max(displayTop, min(y, maxY))
+  y.cint
+
 proc ensureSdl() =
   if sdl2.wasInit(INIT_VIDEO) == 0'u32:
     if not sdl2.init(INIT_VIDEO):
@@ -132,6 +177,7 @@ proc destroyState() =
     if not tex.isNil and not tex.tex.isNil:
       tex.tex.destroy()
   st.iconCache.clear()
+  st.iconPathCache.clear()
   if not st.font.isNil: st.font.close()
   if not st.fontBold.isNil: st.fontBold.close()
   if not st.fontOverlay.isNil: st.fontOverlay.close()
@@ -167,8 +213,8 @@ proc initGui*() =
   st = BackendState(
     window: createWindow(
       "NimLaunch2 SDL2".cstring,
-      if config.centerWindow: SDL_WINDOWPOS_CENTERED else: cint(config.positionX),
-      if config.centerWindow: SDL_WINDOWPOS_CENTERED else: cint(config.positionY),
+      if config.centerWindow: computeAlignedWindowX(config.winWidth, config.displayIndex) else: cint(config.positionX),
+      if config.centerWindow: computeAlignedWindowY(config.winMaxHeight, config.displayIndex) else: cint(config.positionY),
       cint(config.winWidth),
       cint(config.winMaxHeight),
       SDL_WINDOW_HIDDEN or SDL_WINDOW_BORDERLESS or SDL_WINDOW_SKIP_TASKBAR or SDL_WINDOW_UTILITY
@@ -191,6 +237,7 @@ proc initGui*() =
   st.fontBold = loadFont(fontPath, size, makeBold = true)
   st.fontOverlay = loadFont(fontPath, max(size - 2, 6))
   st.iconCache = initTable[string, IconTexture]()
+  st.iconPathCache = initTable[string, string]()
 
   when declared(setWindowOpacity):
     let opac = if config.opacity < 0.1: 0.1 elif config.opacity > 1.0: 1.0 else: config.opacity
@@ -363,7 +410,13 @@ proc getIconTexture(iconName: string; size: int): IconTexture =
   if st.iconCache.hasKey(cacheKey):
     return st.iconCache[cacheKey]
 
-  let path = resolveIconPath(iconName, size)
+  var path = ""
+  if st.iconPathCache.hasKey(cacheKey):
+    path = st.iconPathCache[cacheKey]
+  else:
+    path = resolveIconPath(iconName, size)
+    st.iconPathCache[cacheKey] = path
+
   if path.len == 0:
     return nil
 
@@ -500,7 +553,7 @@ proc drawStatusOverlay() =
 proc drawClock(topRight = false) =
   let nowStr = now().format("HH:mm")
   let (w, h) = measureText(st.fontOverlay, nowStr)
-  let cx = if topRight: config.winWidth - w - 10 else: config.winWidth - w - 10
+  let cx = config.winWidth - w - 10
   let cy = if topRight: h + 6 else: config.winMaxHeight - h - 8
   let tex = renderText(st.fontOverlay, nowStr, colFg)
   if tex.isNil: return
