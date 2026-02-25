@@ -134,11 +134,11 @@ proc localeChain(): seq[string] =
   if base.len > 0:
     var s = base
     let dot = s.find('.'); if dot >= 0: s = s[0 ..< dot]
-    let at  = s.find('@'); if at  >= 0: s = s[0 ..< at]
+    let at = s.find('@'); if at >= 0: s = s[0 ..< at]
     result.add s
     let us = s.find('_')
     if us >= 0:
-      result.add s[0 ..< us]           # language only (e.g. "en")
+      result.add s[0 ..< us] # language only (e.g. "en")
     elif s.len >= 2:
       result.add s[0 ..< 2]
   ## Always finish with plain English fallback, once.
@@ -184,10 +184,15 @@ proc parseDesktopFile*(path: string): Option[DesktopApp] =
     if line.startsWith('[') and line.endsWith(']'):
       inDesktopEntry = (line == "[Desktop Entry]")
       continue
-    if inDesktopEntry and '=' in line:
-      let parts = line.split('=', 1)
-      if parts.len == 2:
-        kv[parts[0].strip()] = parts[1].strip()
+    if inDesktopEntry:
+      let eq = line.find('=')
+      if eq > 0:
+        let key = line[0 ..< eq].strip()
+        if key.len > 0:
+          let value =
+            if eq + 1 < line.len: line[eq + 1 .. ^1].strip()
+            else: ""
+          kv[key] = value
 
   let name = getBestValue(kv, "Name")
   let exec = getBestValue(kv, "Exec")

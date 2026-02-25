@@ -14,7 +14,8 @@ proc tryStart(candidates: seq[(string, seq[string])]): bool =
   for (exe, args) in candidates:
     if exe.len == 0: continue
     try:
-      discard startProcess(exe, args = args, options = {poDaemon, poParentStreams})
+      discard startProcess(exe, args = args, options = {poDaemon,
+          poParentStreams})
       return true
     except CatchableError:
       discard
@@ -22,12 +23,12 @@ proc tryStart(candidates: seq[(string, seq[string])]): bool =
 
 proc openPathWithDefault*(path: string): bool =
   ## Open a file with the system default handler; fall back to common editors.
-  let abs = absolutePath(path)
-  if not fileExists(abs): return false
+  let absPath = absolutePath(path)
+  if not fileExists(absPath): return false
 
   ## Preferred system openers
-  if tryStart(@[(findExe("xdg-open"), @[abs]),
-               (findExe("gio"), @["open", abs])]):
+  if tryStart(@[(findExe("xdg-open"), @[absPath]),
+               (findExe("gio"), @["open", absPath])]):
     return true
 
   ## Respect user editor preference
@@ -52,7 +53,7 @@ proc openPathWithDefault*(path: string): bool =
     var args: seq[string] = @[]
     if tokens.len > 1:
       args = tokens[1 ..< tokens.len]
-    args.add abs
+    args.add absPath
     envCandidates.add((exePath, args))
   if tryStart(envCandidates):
     return true
@@ -62,7 +63,7 @@ proc openPathWithDefault*(path: string): bool =
   for ed in ["gedit", "kate", "mousepad", "code", "nano", "vi"]:
     let exe = findExe(ed)
     if exe.len > 0:
-      fallbackCandidates.add((exe, @[abs]))
+      fallbackCandidates.add((exe, @[absPath]))
   if tryStart(fallbackCandidates):
     return true
 
@@ -74,7 +75,8 @@ proc openPathWithFallback*(path: string): bool =
   if openPathWithDefault(resolved): return true
   if dirExists(resolved) or fileExists(resolved):
     try:
-      discard startProcess("/usr/bin/env", args = @["xdg-open", resolved], options = {poDaemon})
+      discard startProcess("/usr/bin/env", args = @["xdg-open", resolved],
+          options = {poDaemon})
       return true
     except CatchableError:
       echo "openPathWithFallback failed: ", resolved
@@ -94,7 +96,7 @@ proc chooseTerminal*(): string =
   for t in fallbackTerms:
     if whichExists(t):
       return t
-  ""  # headless
+  "" # headless
 
 proc hasHoldFlagLocal*(args: seq[string]): bool =
   ## Detect common "keep window open" flags passed to terminals.
@@ -127,7 +129,7 @@ proc buildTerminalArgs*(base: string; termArgs: seq[string]; shExe: string;
   argv
 
 proc buildShellCommand*(cmd, shExe: string; hold = false):
-    tuple[fullCmd: string, shArgs: seq[string]] =
+    tuple[fullCmd: string; shArgs: seq[string]] =
   ## Run user's command in a group, and add a robust hold prompt when needed.
   ## Grouping prevents suffix binding to pipelines/conditionals.
   let suffix = (if hold: "" else: "; printf '\\n[Press Enter to close]\\n'; read -r _")
@@ -139,26 +141,23 @@ proc runCommand*(cmd: string) =
   ## Run `cmd` in the user's terminal; fall back to /bin/sh if none.
   let bash = findExe("bash")
   let shExe = if bash.len > 0: bash else: "/bin/sh"
-
-  var parts = tokenize(chooseTerminal()) # parser.tokenize on config.terminalExe/$TERMINAL
-  if parts.len == 0:
+  proc runShellFallback() =
     let (_, shArgs) = buildShellCommand(cmd, shExe)
     try:
       discard startProcess(shExe, args = shArgs,
                            options = {poDaemon, poParentStreams})
     except CatchableError as e:
       echo "runCommand failed: ", cmd, " (", e.name, "): ", e.msg
+
+  var parts = tokenize(chooseTerminal()) # parser.tokenize on config.terminalExe/$TERMINAL
+  if parts.len == 0:
+    runShellFallback()
     return
 
   let exe = parts[0]
   let exePath = findExe(exe)
   if exePath.len == 0:
-    let (_, shArgs) = buildShellCommand(cmd, shExe)
-    try:
-      discard startProcess(shExe, args = shArgs,
-                           options = {poDaemon, poParentStreams})
-    except CatchableError as e:
-      echo "runCommand failed: ", cmd, " (", e.name, "): ", e.msg
+    runShellFallback()
     return
 
   var termArgs = if parts.len > 1: parts[1..^1] else: @[]
