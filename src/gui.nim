@@ -309,14 +309,27 @@ proc measureText(font: FontPtr; text: string): (int, int) =
 # -------------------
 # Icon resolution (PNG-only)
 # -------------------
+proc svgCacheName(svgPath: string; size: int): string =
+  ## Build a deterministic cache file name from source path + size + mtime.
+  var mtime = "0"
+  try:
+    mtime = $toUnix(getLastModificationTime(svgPath))
+  except CatchableError:
+    discard
+  var h = 1469598103934665603'u64
+  let src = svgPath & "|" & $size & "|" & mtime
+  for ch in src:
+    h = (h xor uint64(ord(ch))) * 1099511628211'u64
+  let stem = splitFile(svgPath).name
+  stem & "-" & toHex(h, 16).toLowerAscii & ".png"
+
 proc rasterizeSvg(svgPath: string; size: int): string =
   ## Convert an SVG icon to a cached PNG using rsvg-convert; returns cache path or "".
   let exe = findExe("rsvg-convert")
   if exe.len == 0: return ""
   let cacheDir = iconCacheDir(size)
   try: createDir(cacheDir) except CatchableError: discard
-  let base = svgPath.extractFilename
-  let outPath = cacheDir / (base & ".png")
+  let outPath = cacheDir / svgCacheName(svgPath, size)
   if fileExists(outPath):
     return outPath
   try:
@@ -665,15 +678,21 @@ proc drawCommandBar() =
       tex.destroy()
 
 proc drawBorder() =
-  if config.borderWidth <= 0:
+  let maxUsableBorder = max(0, (min(config.winWidth, config.winMaxHeight) - 1) div 2)
+  let borderWidth = min(config.borderWidth, maxUsableBorder)
+  if borderWidth <= 0:
     return
   discard st.renderer.setDrawColor(colBorder.r, colBorder.g, colBorder.b, 255'u8)
-  for i in 0 ..< config.borderWidth:
+  for i in 0 ..< borderWidth:
+    let rectW = config.winWidth - 1 - i * 2
+    let rectH = config.winMaxHeight - 1 - i * 2
+    if rectW <= 0 or rectH <= 0:
+      break
     var rect: Rect
     rect.x = cint(i)
     rect.y = cint(i)
-    rect.w = cint(config.winWidth - 1 - i * 2)
-    rect.h = cint(config.winMaxHeight - 1 - i * 2)
+    rect.w = rectW.cint
+    rect.h = rectH.cint
     discard st.renderer.drawRect(addr rect)
 
 proc presentFrame() =

@@ -18,6 +18,7 @@ type
     formatVersion*: int
     appDirs*: seq[string]
     dirMtimes*: seq[int64]
+    dirSignatures*: seq[string]
     apps*: seq[DesktopApp]
 
   ## Launcher configuration populated by initLauncherConfig.

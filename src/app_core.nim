@@ -17,6 +17,7 @@ var
   actions*: seq[Action] ## transient list for the UI
 
 const
+  DefaultAppSearchCap = 200
   iconAliases = {
     "code": "visual-studio-code",
     "codium": "vscodium",
@@ -423,7 +424,7 @@ proc buildDefaultActions(rest: string; defaultIndex: var int): seq[Action] =
             appData: app, iconName: iconName)
   else:
     var top = initHeapQueue[(int, int)]()
-    let limit = config.maxVisibleItems
+    let limit = max(DefaultAppSearchCap, config.maxVisibleItems * 8)
     for i, app in allApps:
       let s = scoreMatch(rest, app.name, app.name, "")
       if s > -1_000_000:
@@ -536,7 +537,9 @@ proc performAction*(a: Action) =
   var exitAfter = true ## default: exit after action
   case a.kind
   of akRun:
-    runCommand(a.exec)
+    if not runCommand(a.exec):
+      gui.notifyStatus("Failed: " & a.label, 1600)
+      exitAfter = false
   of akConfig:
     if not openPathWithFallback(a.exec):
       gui.notifyStatus("Failed: " & a.label, 1600)
@@ -560,14 +563,16 @@ proc performAction*(a: Action) =
   of akShortcut:
     case a.shortcutMode
     of smUrl:
-      openUrl(a.exec)
+      if not openUrl(a.exec):
+        gui.notifyStatus("Failed: " & a.label, 1600)
+        exitAfter = false
     of smShell:
       var success = true
       case a.powerMode
       of pamSpawn:
         success = spawnShellCommand(a.exec)
       of pamTerminal:
-        runCommand(a.exec)
+        success = runCommand(a.exec)
       if not success:
         gui.notifyStatus("Failed: " & a.label, 1600)
         exitAfter = false
@@ -587,7 +592,7 @@ proc performAction*(a: Action) =
     of pamSpawn:
       success = spawnShellCommand(a.exec)
     of pamTerminal:
-      runCommand(a.exec)
+      success = runCommand(a.exec)
     if not success:
       gui.notifyStatus("Failed: " & a.label, 1600)
       exitAfter = false

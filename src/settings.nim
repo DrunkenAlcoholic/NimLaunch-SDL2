@@ -7,6 +7,31 @@ import ./[state as st, gui, utils, paths]
 var
   baseMatchFgColorHex = "" ## default fallback for match highlight colour
 
+proc tomlEscapeBasicString(s: string): string =
+  ## Escape a string for TOML basic-string context.
+  result = newStringOfCap(s.len)
+  for ch in s:
+    case ch
+    of '\\':
+      result.add "\\\\"
+    of '\"':
+      result.add "\\\""
+    of '\b':
+      result.add "\\b"
+    of '\t':
+      result.add "\\t"
+    of '\n':
+      result.add "\\n"
+    of '\f':
+      result.add "\\f"
+    of '\r':
+      result.add "\\r"
+    else:
+      if ord(ch) < 0x20:
+        result.add "\\u00" & toHex(ord(ch), 2)
+      else:
+        result.add ch
+
 proc applyTheme*(cfg: var Config; name: string) =
   ## Set theme fields from `themeList` by name; respect explicit match color.
   let fallbackMatch = if baseMatchFgColorHex.len > 0:
@@ -56,6 +81,8 @@ proc applyThemeAndColors*(cfg: var Config; name: string; doNotify = true) =
 
 proc saveLastTheme*(cfgPath: string) =
   ## Update or insert [theme].last_chosen = "<name>" in the TOML file.
+  let escapedTheme = tomlEscapeBasicString(st.config.themeName)
+  let lastChosenLine = "last_chosen = \"" & escapedTheme & "\""
   var lines: seq[string]
   try:
     lines = readFile(cfgPath).splitLines()
@@ -73,23 +100,23 @@ proc saveLastTheme*(cfgPath: string) =
       continue
     if inTheme:
       if l.startsWith("[") and l.endsWith("]"):
-        lines.insert("last_chosen = \"" & st.config.themeName & "\"", i)
+        lines.insert(lastChosenLine, i)
         updated = true
         inTheme = false
         break
       let eq = l.find('=')
       if eq > 0 and l[0 ..< eq].strip() == "last_chosen":
-        lines[i] = "last_chosen = \"" & st.config.themeName & "\""
+        lines[i] = lastChosenLine
         updated = true
         inTheme = false
         break
   if inTheme and not updated:
-    lines.add("last_chosen = \"" & st.config.themeName & "\"")
+    lines.add(lastChosenLine)
     updated = true
   if not themeSectionFound:
     lines.add("")
     lines.add("[theme]")
-    lines.add("last_chosen = \"" & st.config.themeName & "\"")
+    lines.add(lastChosenLine)
     updated = true
   if updated:
     try:
@@ -376,9 +403,14 @@ proc initLauncherConfig*() =
     st.config.maxVisibleItems = 1
   if st.config.borderWidth < 0:
     st.config.borderWidth = 0
+  elif st.config.borderWidth > 64:
+    st.config.borderWidth = 64
   if st.config.displayIndex < 0:
     st.config.displayIndex = 0
   st.config.opacity = clamp(st.config.opacity, 0.1, 1.0)
 
   ## derived geometry
   st.config.winMaxHeight = 40 + st.config.maxVisibleItems * st.config.lineHeight
+  let maxUsableBorder = max(0, (min(st.config.winWidth, st.config.winMaxHeight) - 1) div 2)
+  if st.config.borderWidth > maxUsableBorder:
+    st.config.borderWidth = maxUsableBorder

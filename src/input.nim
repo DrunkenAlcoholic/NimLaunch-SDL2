@@ -251,8 +251,8 @@ proc appendTextInput*(txt: string) =
     syncVimCommand()
   else:
     inputText.add(txt)
-  lastInputChangeMs = gui.nowMs()
-  buildActions()
+    lastInputChangeMs = gui.nowMs()
+    buildActions()
 
 proc handleWindowEvent*(ev: Event; focus: var FocusState): bool =
   ## Handle window lifecycle/resize events and report whether a redraw is needed.

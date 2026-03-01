@@ -3,25 +3,39 @@
 import std/[os, json, tables, sequtils, times, options, strutils, algorithm]
 import ./[state, parser, paths]
 
-const CacheFormatVersion = 4
+const CacheFormatVersion = 5
 
-proc newestDesktopMtime(dir: string): int64 =
-  ## Return newest mtime among *.desktop files under *dir* (recursive).
-  if not dirExists(dir): return 0
+proc desktopDirFingerprint(dir: string): tuple[newest: int64; signature: string] =
+  ## Build a lightweight fingerprint for *.desktop files under *dir*.
+  ## Includes newest mtime, file count, summed mtimes, and summed file sizes.
+  if not dirExists(dir):
+    return (0'i64, "0:0:0:0")
   var newest = 0'i64
+  var count = 0'i64
+  var sumMtime = 0'i64
+  var sumSize = 0'i64
   for entry in walkDirRec(dir, yieldFilter = {pcFile}):
     if entry.endsWith(".desktop"):
       try:
-        let m = times.toUnix(getLastModificationTime(entry))
+        let info = getFileInfo(entry)
+        let m = times.toUnix(info.lastWriteTime)
         if m > newest: newest = m
+        inc count
+        sumMtime += m
+        sumSize += info.size.int64
       except CatchableError:
         discard
-  newest
+  (newest, $count & ":" & $newest & ":" & $sumMtime & ":" & $sumSize)
 
 proc loadApplications*() =
   ## Scan .desktop files with caching to ~/.cache/nimlaunch/apps.json.
   let appDirs = applicationDirs()
-  let dirMtimes = appDirs.map(newestDesktopMtime)
+  var dirMtimes: seq[int64] = @[]
+  var dirSignatures: seq[string] = @[]
+  for dir in appDirs:
+    let fp = desktopDirFingerprint(dir)
+    dirMtimes.add fp.newest
+    dirSignatures.add fp.signature
 
   let cacheBase = cacheDir()
   let cacheFile = cacheBase / "apps.json"
@@ -32,7 +46,8 @@ proc loadApplications*() =
       if node.kind == JObject and node.hasKey("formatVersion"):
         let c = to(node, CacheData)
         if c.formatVersion == CacheFormatVersion and
-           c.appDirs == appDirs and c.dirMtimes == dirMtimes:
+           c.appDirs == appDirs and c.dirMtimes == dirMtimes and
+           c.dirSignatures == dirSignatures:
           allApps = c.apps
           filteredApps = @[]
           matchSpans = @[]
@@ -68,6 +83,7 @@ proc loadApplications*() =
     writeFile(cacheFile, pretty(%CacheData(formatVersion: CacheFormatVersion,
                                            appDirs: appDirs,
                                            dirMtimes: dirMtimes,
+                                           dirSignatures: dirSignatures,
                                            apps: allApps)))
   except CatchableError:
     echo "Warning: cache not saved."

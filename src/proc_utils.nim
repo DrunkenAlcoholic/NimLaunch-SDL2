@@ -137,28 +137,28 @@ proc buildShellCommand*(cmd, shExe: string; hold = false):
   let shArgs = if shExe.endsWith("bash"): @["-lc", fullCmd] else: @["-c", fullCmd]
   (fullCmd, shArgs)
 
-proc runCommand*(cmd: string) =
+proc runCommand*(cmd: string): bool =
   ## Run `cmd` in the user's terminal; fall back to /bin/sh if none.
   let bash = findExe("bash")
   let shExe = if bash.len > 0: bash else: "/bin/sh"
-  proc runShellFallback() =
+  proc runShellFallback(): bool =
     let (_, shArgs) = buildShellCommand(cmd, shExe)
     try:
       discard startProcess(shExe, args = shArgs,
                            options = {poDaemon, poParentStreams})
+      return true
     except CatchableError as e:
       echo "runCommand failed: ", cmd, " (", e.name, "): ", e.msg
+      return false
 
   var parts = tokenize(chooseTerminal()) # parser.tokenize on config.terminalExe/$TERMINAL
   if parts.len == 0:
-    runShellFallback()
-    return
+    return runShellFallback()
 
   let exe = parts[0]
   let exePath = findExe(exe)
   if exePath.len == 0:
-    runShellFallback()
-    return
+    return runShellFallback()
 
   var termArgs = if parts.len > 1: parts[1..^1] else: @[]
   let base = exe.extractFilename()
@@ -168,8 +168,10 @@ proc runCommand*(cmd: string) =
   try:
     discard startProcess(exePath, args = argv,
                          options = {poDaemon, poParentStreams})
+    true
   except CatchableError as e:
     echo "runCommand failed: ", cmd, " (", e.name, "): ", e.msg
+    runShellFallback()
 
 proc spawnShellCommand*(cmd: string): bool =
   ## Execute *cmd* via /bin/sh in the background; return success.
@@ -181,10 +183,12 @@ proc spawnShellCommand*(cmd: string): bool =
     echo "spawnShellCommand failed: ", cmd, " (", e.name, "): ", e.msg
     false
 
-proc openUrl*(url: string) =
+proc openUrl*(url: string): bool =
   ## Open *url* via xdg-open (no shell involved). Log failures for diagnosis.
   try:
     discard startProcess("/usr/bin/env", args = @["xdg-open", url],
                          options = {poDaemon, poParentStreams})
+    true
   except CatchableError as e:
     echo "openUrl failed: ", url, " (", e.name, "): ", e.msg
+    false
